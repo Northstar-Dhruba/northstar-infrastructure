@@ -21,9 +21,43 @@ wheels = [
 ]
 
 [[package]]
+name = "northstar-application"
+version = "0.1.0"
+source = { editable = "../northstar-application" }
+dependencies = [
+    { name = "northstar-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "northstar-core", editable = "../northstar-core" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.16.1" },
+]
+
+[[package]]
+name = "northstar-core"
+version = "0.1.0"
+source = { editable = "../northstar-core" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.16.1" },
+]
+
+[[package]]
 name = "northstar-infrastructure"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "northstar-application" },
+    { name = "northstar-core" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -32,6 +66,10 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "northstar-application", editable = "../northstar-application" },
+    { name = "northstar-core", editable = "../northstar-core" },
+]
 
 [package.metadata.requires-dev]
 dev = [

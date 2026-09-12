@@ -7,7 +7,14 @@ authors = [
     { name = "Dhruba1010", email = "dhrubasinha096p@gmail.com" }
 ]
 requires-python = ">=3.13,<3.14"
-dependencies = []
+dependencies = [
+    "northstar-application",
+    "northstar-core",
+]
+
+[tool.uv.sources]
+northstar-application = { path = "../northstar-application", editable = true }
+northstar-core = { path = "../northstar-core", editable = true }
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
