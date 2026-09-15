@@ -57,18 +57,22 @@ def _required_number(value: Any, field_name: str) -> str:
 
 
 def _canonical_exchange_code(value: Any) -> str:
-    candidate = str(value or "OTHER").strip().upper()
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("Yahoo Finance returned incomplete exchange metadata.")
+    candidate = value.strip().upper()
     if not 2 <= len(candidate) <= 16 or not all(
         char.isalnum() or char == "_" for char in candidate
     ):
-        return "OTHER"
+        raise RuntimeError("Yahoo Finance returned invalid exchange metadata.")
     return candidate
 
 
 def _canonical_currency(value: Any) -> str:
-    candidate = str(value or "USD").strip().upper()
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("Yahoo Finance returned incomplete currency metadata.")
+    candidate = value.strip().upper()
     if not 3 <= len(candidate) <= 5 or not candidate.isalpha():
-        return "USD"
+        raise RuntimeError("Yahoo Finance returned invalid currency metadata.")
     return candidate
 
 
