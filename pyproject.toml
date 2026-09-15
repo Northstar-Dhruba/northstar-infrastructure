@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "exchange-calendars>=4.13.2",
     "northstar-application",
     "northstar-core",
 ]
