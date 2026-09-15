@@ -5,16 +5,18 @@
 ## Implemented in Alpha v0.4
 
 - `YahooFinanceMarketObservationSource` under `market_data`.
+- `SQLiteHistoricalMarketDataRepository` for deterministic local historical research reads.
+- Infrastructure-owned SQLite schema initialization for generic OHLCV observations.
 - Yahoo Finance chart-data transport using the Python standard library.
 - Translation of one bounded daily market response into the existing `MarketObservationContext` contract.
 - Explicit handling of provider unavailability, unknown symbols, incomplete observations, invalid values, timestamps, and required metadata.
-- Deterministic adapter tests using fake transport; tests do not require live network access.
+- Deterministic adapter and repository tests; tests do not require live network access.
 
 ## Current Scope
 
-The repository currently supports the single market-observation integration required by the Northstar one-asset intelligence workflow. The adapter is wired at the API composition root and implements the Application `MarketObservationSource` port.
+The repository supports the one-asset market-observation integration and the Story 6.1 local historical repository. Historical reads are provider-independent and use a local SQLite store keyed by symbol, exchange, timeframe, and point in time. Historical acquisition and population are out of scope for this story.
 
-Infrastructure owns provider communication, request construction, response parsing, and provider failure translation. It does not own recommendation policy, AssetAnalysis interpretation, or application orchestration.
+Infrastructure owns provider communication, local storage schema, response parsing, and technical failure translation. It does not own recommendation policy, AssetAnalysis interpretation, or application orchestration. The generic repository can coexist with future derivatives-specific historical models without claiming that the current schema models futures or options contract identity.
 
 ## Dependency Direction
 
