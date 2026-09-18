@@ -7,7 +7,11 @@ from decimal import Decimal
 from functools import cmp_to_key
 from pathlib import Path
 
-from northstar_application.ports import HistoricalMarketDataQuery, HistoricalMarketDataRepository
+from northstar_application.ports import (
+    HistoricalMarketDataQuery,
+    HistoricalMarketDataRepository,
+    HistoricalMarketDataStore,
+)
 from northstar_core.foundation.value_objects import (
     Currency,
     ExchangeCode,
@@ -19,9 +23,69 @@ from northstar_core.foundation.value_objects import (
 )
 from northstar_core.market_data import HistoricalOHLCVBar
 
+from northstar_infrastructure.market_data.sqlite_schema import (
+    initialize_historical_market_data_schema,
+)
+
 
 class HistoricalStorageError(RuntimeError):
     """Raised when the local historical market data store is unavailable or malformed."""
+
+
+class SQLiteHistoricalMarketDataStore(HistoricalMarketDataStore):
+    """Persist historical OHLCV observations into a local SQLite store."""
+
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = str(database_path)
+
+    def store(self, observations: tuple[HistoricalOHLCVBar, ...]) -> int:
+        """Persist a batch of observations idempotently and atomically."""
+        if not observations:
+            return 0
+
+        rows = [
+            (
+                bar.symbol.value,
+                bar.exchange_code.value,
+                bar.point_in_time.value,
+                bar.timeframe.value,
+                bar.open.currency.value,
+                str(bar.open.amount),
+                str(bar.high.amount),
+                str(bar.low.amount),
+                str(bar.close.amount),
+                str(bar.volume.value),
+                str(bar.adjusted_close.amount) if bar.adjusted_close is not None else None,
+            )
+            for bar in observations
+        ]
+
+        try:
+            with sqlite3.connect(self._database_path) as connection:
+                initialize_historical_market_data_schema(connection)
+                connection.executemany(
+                    """
+                    INSERT INTO historical_ohlcv (
+                        symbol, exchange_code, point_in_time, timeframe,
+                        currency, open, high, low, close, volume, adjusted_close
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (symbol, exchange_code, timeframe, point_in_time)
+                    DO UPDATE SET
+                        currency = excluded.currency,
+                        open = excluded.open,
+                        high = excluded.high,
+                        low = excluded.low,
+                        close = excluded.close,
+                        volume = excluded.volume,
+                        adjusted_close = excluded.adjusted_close
+                    """,
+                    rows,
+                )
+                connection.commit()
+        except (sqlite3.Error, Exception) as exc:
+            raise HistoricalStorageError("Historical market data storage is unavailable.") from exc
+
+        return len(observations)
 
 
 class SQLiteHistoricalMarketDataRepository(HistoricalMarketDataRepository):

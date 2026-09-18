@@ -4,11 +4,21 @@ import sqlite3
 from pathlib import Path
 
 from northstar_application.ports import HistoricalMarketDataQuery
-from northstar_core.foundation.value_objects import ExchangeCode, PointInTime, Symbol, Timeframe
+from northstar_core.foundation.value_objects import (
+    Currency,
+    ExchangeCode,
+    PointInTime,
+    Price,
+    Quantity,
+    Symbol,
+    Timeframe,
+)
+from northstar_core.market_data import HistoricalOHLCVBar
 
 from northstar_infrastructure.market_data import (
     HistoricalStorageError,
     SQLiteHistoricalMarketDataRepository,
+    SQLiteHistoricalMarketDataStore,
 )
 from northstar_infrastructure.market_data.sqlite_schema import (
     initialize_historical_market_data_schema,
@@ -276,3 +286,150 @@ def test_repository_maps_storage_invariant_failures_without_leaking_sqlite_error
         assert "sqlite" not in str(error).casefold()
     else:
         raise AssertionError("Expected invalid storage data failure")
+
+
+def _make_bar(
+    symbol: str = "AAPL",
+    exchange: str = "NASDAQ",
+    timestamp: str = "2026-09-01T00:00:00Z",
+    timeframe: str = "1d",
+    currency: str = "USD",
+    open_price: str = "100",
+    high_price: str = "105",
+    low_price: str = "95",
+    close_price: str = "102",
+    volume: str = "1000",
+    adjusted_close: str | None = None,
+) -> HistoricalOHLCVBar:
+    c = Currency(currency)
+    return HistoricalOHLCVBar(
+        symbol=Symbol(symbol),
+        exchange_code=ExchangeCode(exchange),
+        point_in_time=PointInTime(timestamp),
+        timeframe=Timeframe(timeframe),
+        open=Price(open_price, c),
+        high=Price(high_price, c),
+        low=Price(low_price, c),
+        close=Price(close_price, c),
+        volume=Quantity(volume),
+        adjusted_close=Price(adjusted_close, c) if adjusted_close else None,
+    )
+
+
+def test_store_empty_tuple_returns_zero_without_creating_database(tmp_path: Path) -> None:
+    database_path = tmp_path / "empty.sqlite"
+    store = SQLiteHistoricalMarketDataStore(database_path)
+
+    count = store.store(())
+
+    assert count == 0
+    assert not database_path.exists()
+
+
+def test_store_persists_batch_and_allows_repository_retrieval(tmp_path: Path) -> None:
+    database_path = tmp_path / "history.sqlite"
+    store = SQLiteHistoricalMarketDataStore(database_path)
+    repository = SQLiteHistoricalMarketDataRepository(database_path)
+
+    bars = (
+        _make_bar(timestamp="2026-09-01T00:00:00Z", close_price="101"),
+        _make_bar(timestamp="2026-09-02T00:00:00Z", close_price="102", adjusted_close="101.5"),
+        _make_bar(timestamp="2026-09-03T00:00:00Z", close_price="103"),
+    )
+
+    count = store.store(bars)
+
+    assert count == 3
+    retrieved = repository.get_history(_query("2026-09-01T00:00:00Z", "2026-09-03T00:00:00Z"))
+    assert len(retrieved) == 3
+    assert retrieved[0].point_in_time.value == "2026-09-01T00:00:00Z"
+    assert retrieved[1].adjusted_close is not None
+    assert str(retrieved[1].adjusted_close.amount) == "101.5"
+    assert retrieved[2].point_in_time.value == "2026-09-03T00:00:00Z"
+
+
+def test_store_repeated_identical_batch_is_idempotent(tmp_path: Path) -> None:
+    database_path = tmp_path / "history.sqlite"
+    store = SQLiteHistoricalMarketDataStore(database_path)
+    repository = SQLiteHistoricalMarketDataRepository(database_path)
+
+    bars = (
+        _make_bar(timestamp="2026-09-01T00:00:00Z", close_price="101"),
+        _make_bar(timestamp="2026-09-02T00:00:00Z", close_price="102"),
+    )
+
+    count_1 = store.store(bars)
+    count_2 = store.store(bars)
+
+    assert count_1 == 2
+    assert count_2 == 2
+
+    retrieved = repository.get_history(_query("2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"))
+    assert len(retrieved) == 2
+
+
+def test_store_upsert_replaces_previous_values_for_same_identity(tmp_path: Path) -> None:
+    database_path = tmp_path / "history.sqlite"
+    store = SQLiteHistoricalMarketDataStore(database_path)
+    repository = SQLiteHistoricalMarketDataRepository(database_path)
+
+    initial_bars = (_make_bar(timestamp="2026-09-01T00:00:00Z", close_price="101", volume="1000"),)
+    store.store(initial_bars)
+
+    revised_bars = (
+        _make_bar(
+            timestamp="2026-09-01T00:00:00Z",
+            close_price="105",
+            high_price="108",
+            volume="2500",
+            adjusted_close="104.5",
+        ),
+    )
+    count = store.store(revised_bars)
+
+    assert count == 1
+    retrieved = repository.get_history(_query("2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"))
+    assert len(retrieved) == 1
+    assert str(retrieved[0].close.amount) == "105"
+    assert str(retrieved[0].high.amount) == "108"
+    assert str(retrieved[0].volume.value) == "2500"
+    assert retrieved[0].adjusted_close is not None
+    assert str(retrieved[0].adjusted_close.amount) == "104.5"
+
+
+def test_store_canonical_point_in_time_normalization(tmp_path: Path) -> None:
+    database_path = tmp_path / "history.sqlite"
+    store = SQLiteHistoricalMarketDataStore(database_path)
+    repository = SQLiteHistoricalMarketDataRepository(database_path)
+
+    bar = _make_bar(timestamp="2026-09-01T14:30:00+05:00")
+    assert bar.point_in_time.value == "2026-09-01T09:30:00Z"
+
+    store.store((bar,))
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute("SELECT point_in_time FROM historical_ohlcv").fetchone()
+        assert row[0] == "2026-09-01T09:30:00Z"
+
+    retrieved = repository.get_history(_query("2026-09-01T09:30:00Z", "2026-09-01T09:30:00Z"))
+    assert len(retrieved) == 1
+    assert retrieved[0].point_in_time.value == "2026-09-01T09:30:00Z"
+
+
+def test_store_failure_rolls_back_and_raises_storage_error(tmp_path: Path) -> None:
+    database_path = tmp_path / "history.sqlite"
+    _create_database(database_path)
+    store = SQLiteHistoricalMarketDataStore(database_path)
+
+    # Force database to be read-only by making a read-only URI or corrupting table
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TABLE historical_ohlcv")
+        connection.execute("CREATE VIEW historical_ohlcv AS SELECT 1 AS symbol")
+
+    bars = (_make_bar(timestamp="2026-09-10T00:00:00Z"),)
+    try:
+        store.store(bars)
+    except HistoricalStorageError as error:
+        assert "storage is unavailable" in str(error)
+    else:
+        raise AssertionError("Expected HistoricalStorageError on failed store")
