@@ -11,10 +11,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from northstar_application.ports import MarketObservationSource
-from northstar_core.domain.exchange import Exchange
-from northstar_core.domain.instrument import Instrument
-from northstar_core.domain.listing import Listing
-from northstar_core.domain.value_objects import ListingStatus, Tradability
+from northstar_core.domain.value_objects import ListingReference
 from northstar_core.foundation.value_objects import (
     Currency,
     ExchangeCode,
@@ -131,24 +128,14 @@ class YahooFinanceMarketObservationSource(MarketObservationSource):
             previous_close = rows[-2][1]
 
         currency = Currency(_canonical_currency(_provider_value(meta, "currency")))
-        listing = Listing(
-            instrument=Instrument(
-                symbol=symbol,
-                name=str(_provider_value(meta, "longName", symbol.value)),
-                asset_class=str(_provider_value(meta, "quoteType", "Unknown")),
+        listing_reference = ListingReference(
+            symbol=symbol,
+            exchange_code=ExchangeCode(
+                _canonical_exchange_code(_provider_value(meta, "exchangeName"))
             ),
-            exchange=Exchange(
-                exchange_code=ExchangeCode(
-                    _canonical_exchange_code(_provider_value(meta, "exchangeName"))
-                ),
-                name=str(_provider_value(meta, "exchangeName", "Unknown exchange")),
-            ),
-            currency=currency,
-            listing_status=ListingStatus("Active"),
-            tradability=Tradability("Permitted"),
         )
         return MarketObservationContext(
-            listing=listing,
+            listing_reference=listing_reference,
             observed_at=PointInTime(f"{_iso_timestamp(latest_timestamp)}Z"),
             latest_price=Price(_required_number(latest_close, "latest price"), currency),
             previous_close=Price(_required_number(previous_close, "previous close"), currency),
