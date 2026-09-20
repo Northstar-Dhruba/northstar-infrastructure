@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from decimal import Decimal
 from functools import cmp_to_key
 from pathlib import Path
@@ -121,8 +122,26 @@ def _evidence_payload(record: ForwardResearchRecord) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _validate_version(payload: Any) -> None:
+    """Reject evidence this reader cannot faithfully interpret.
+
+    Stored evidence is read back into value objects whose invariants depend on
+    the payload's shape, so a payload written by a different evidence version
+    must not be decoded on a best-effort basis. Both failures are raised as
+    TypeError and ValueError so they reach callers through the existing
+    ForwardResearchStorageError mapping.
+    """
+    if not isinstance(payload, dict):
+        raise TypeError("Forward research evidence must be a JSON object.")
+
+    version = payload.get("version")
+    if version != _EVIDENCE_VERSION:
+        raise ValueError(f"Unsupported forward research evidence version {version!r}.")
+
+
 def _record(evidence: str) -> ForwardResearchRecord:
     payload = json.loads(evidence)
+    _validate_version(payload)
     context_payload = payload["context"]
     analysis_payload = payload["analysis"]
     recommendation_payload = payload["recommendation"]
@@ -303,7 +322,7 @@ class SQLiteForwardResearchRecordRepository(ForwardResearchRecordRepository):
             )
 
         try:
-            with sqlite3.connect(self._database_path) as connection:
+            with closing(sqlite3.connect(self._database_path)) as connection:
                 initialize_forward_research_record_schema(connection)
                 rows = connection.execute(
                     """
