@@ -37,6 +37,7 @@ from northstar_core.strategy import (
 )
 
 from northstar_infrastructure.persistence import (
+    ForwardResearchStorageError,
     SQLiteForwardResearchRecordRepository,
     SQLiteForwardResearchRecordStore,
 )
@@ -601,3 +602,108 @@ def test_natural_key_columns_are_queryable_and_constrained(database_path: Path) 
 
     assert row == ("AAPL", "NASDAQ", "1d", "2026-01-20T16:00:00Z", "mvp")
     assert indexes, "expected the natural key to be enforced by a primary key index"
+
+
+# ---------------------------------------------------------------------------
+# Evidence version handling
+# ---------------------------------------------------------------------------
+
+
+def _rewrite_evidence(database_path: Path, evidence: str) -> None:
+    """Replace the single stored payload, simulating foreign or older data."""
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("UPDATE forward_research_records SET evidence = ?", (evidence,))
+
+
+def test_stored_evidence_carries_the_current_version(database_path: Path) -> None:
+    SQLiteForwardResearchRecordStore(database_path).store((_record(),))
+
+    with sqlite3.connect(database_path) as connection:
+        evidence = connection.execute("SELECT evidence FROM forward_research_records").fetchone()[0]
+
+    assert json.loads(evidence)["version"] == 1
+
+
+@pytest.mark.parametrize("version", [0, 2, 99, "1", None, [], {}])
+def test_unsupported_evidence_version_is_a_storage_error(
+    database_path: Path, version: object
+) -> None:
+    store = SQLiteForwardResearchRecordStore(database_path)
+    store.store((_record(),))
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute("SELECT evidence FROM forward_research_records").fetchone()[0]
+        )
+    payload["version"] = version
+    _rewrite_evidence(database_path, json.dumps(payload))
+
+    with pytest.raises(ForwardResearchStorageError, match="invalid data"):
+        SQLiteForwardResearchRecordRepository(database_path).get_records(_query())
+
+
+def test_a_numerically_equal_version_is_the_same_version(database_path: Path) -> None:
+    """JSON has one number type, so 1.0 and 1 denote the same evidence version."""
+    record = _record()
+    SQLiteForwardResearchRecordStore(database_path).store((record,))
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute("SELECT evidence FROM forward_research_records").fetchone()[0]
+        )
+    payload["version"] = 1.0
+    _rewrite_evidence(database_path, json.dumps(payload))
+
+    assert SQLiteForwardResearchRecordRepository(database_path).get_records(_query()) == (record,)
+
+
+def test_missing_evidence_version_is_a_storage_error(database_path: Path) -> None:
+    store = SQLiteForwardResearchRecordStore(database_path)
+    store.store((_record(),))
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute("SELECT evidence FROM forward_research_records").fetchone()[0]
+        )
+    del payload["version"]
+    _rewrite_evidence(database_path, json.dumps(payload))
+
+    with pytest.raises(ForwardResearchStorageError, match="invalid data"):
+        SQLiteForwardResearchRecordRepository(database_path).get_records(_query())
+
+
+def test_non_object_evidence_is_a_storage_error(database_path: Path) -> None:
+    SQLiteForwardResearchRecordStore(database_path).store((_record(),))
+    _rewrite_evidence(database_path, json.dumps(["not", "an", "object"]))
+
+    with pytest.raises(ForwardResearchStorageError, match="invalid data"):
+        SQLiteForwardResearchRecordRepository(database_path).get_records(_query())
+
+
+def test_unparseable_evidence_is_a_storage_error(database_path: Path) -> None:
+    SQLiteForwardResearchRecordStore(database_path).store((_record(),))
+    _rewrite_evidence(database_path, "{not json")
+
+    with pytest.raises(ForwardResearchStorageError, match="invalid data"):
+        SQLiteForwardResearchRecordRepository(database_path).get_records(_query())
+
+
+def test_version_is_validated_before_a_conflicting_store_comparison(
+    database_path: Path,
+) -> None:
+    """The store decodes existing evidence too, so it maps the same failure."""
+    store = SQLiteForwardResearchRecordStore(database_path)
+    store.store((_record(),))
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute("SELECT evidence FROM forward_research_records").fetchone()[0]
+        )
+    payload["version"] = 99
+    _rewrite_evidence(database_path, json.dumps(payload))
+
+    with pytest.raises(ForwardResearchStorageError, match="invalid data"):
+        store.store((_record(),))
+
+
+def test_a_valid_version_still_round_trips(database_path: Path) -> None:
+    record = _record()
+    SQLiteForwardResearchRecordStore(database_path).store((record,))
+
+    assert SQLiteForwardResearchRecordRepository(database_path).get_records(_query()) == (record,)
