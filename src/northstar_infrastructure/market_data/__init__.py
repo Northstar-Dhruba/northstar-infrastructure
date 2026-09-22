@@ -1,5 +1,8 @@
 """Market data infrastructure adapters."""
 
+from northstar_infrastructure.market_data.exchange_calendar_futures_completion import (
+    ExchangeCalendarFuturesDailyBarCompletionResolver,
+)
 from northstar_infrastructure.market_data.sqlite_futures_historical_market_data import (
     FuturesHistoricalStorageError,
     SQLiteFuturesHistoricalMarketDataRepository,
@@ -27,6 +30,7 @@ from northstar_infrastructure.market_data.yahoo_historical_market_data import (
 __all__ = [
     "FUTURES_MARKET_DATA_SCHEMA",
     "HISTORICAL_MARKET_DATA_SCHEMA",
+    "ExchangeCalendarFuturesDailyBarCompletionResolver",
     "FuturesHistoricalStorageError",
     "HistoricalMarketDataSourceError",
     "HistoricalStorageError",
