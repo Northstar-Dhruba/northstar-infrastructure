@@ -1,5 +1,14 @@
 """Market data infrastructure adapters."""
 
+from northstar_infrastructure.market_data.sqlite_futures_historical_market_data import (
+    FuturesHistoricalStorageError,
+    SQLiteFuturesHistoricalMarketDataRepository,
+    SQLiteFuturesHistoricalMarketDataStore,
+)
+from northstar_infrastructure.market_data.sqlite_futures_schema import (
+    FUTURES_MARKET_DATA_SCHEMA,
+    initialize_futures_market_data_schema,
+)
 from northstar_infrastructure.market_data.sqlite_historical_market_data import (
     HistoricalStorageError,
     SQLiteHistoricalMarketDataRepository,
@@ -16,12 +25,17 @@ from northstar_infrastructure.market_data.yahoo_historical_market_data import (
 )
 
 __all__ = [
+    "FUTURES_MARKET_DATA_SCHEMA",
     "HISTORICAL_MARKET_DATA_SCHEMA",
+    "FuturesHistoricalStorageError",
     "HistoricalMarketDataSourceError",
     "HistoricalStorageError",
+    "SQLiteFuturesHistoricalMarketDataRepository",
+    "SQLiteFuturesHistoricalMarketDataStore",
     "SQLiteHistoricalMarketDataRepository",
     "SQLiteHistoricalMarketDataStore",
     "YahooFinanceMarketObservationSource",
     "YahooHistoricalMarketDataSource",
+    "initialize_futures_market_data_schema",
     "initialize_historical_market_data_schema",
 ]
