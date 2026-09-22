@@ -1,11 +1,19 @@
 """SQLite-backed futures historical market data store and repository.
 
-A settled futures bar is immutable evidence. A contract has no splits and no
-dividends, there is no adjusted close to restate, and once it expires its
-history is closed, so a differing bar under an existing natural key means two
-sources disagree rather than that a correction arrived. This module therefore
-issues INSERT only, and contains no UPDATE, no REPLACE, no overwriting upsert
-and no DELETE.
+A settled futures bar is treated as immutable evidence. A contract has no
+splits and no dividends and no adjusted close to restate, so the equity
+restatement mechanism does not apply here.
+
+Futures observations can still be corrected: exchanges revise settlement
+prices, trades are busted after the fact, session volume is finalised late, and
+providers reissue data they got wrong. A differing bar under an existing
+natural key may therefore be a genuine correction, two sources disagreeing, or
+a back-adjusted continuous series leaking in under a real contract's key. Those
+look identical to a store, so none of them is applied silently: the differing
+evidence surfaces as a conflict, and an explicit reconciliation step -- one
+that does not exist yet -- decides what is true. This module therefore issues
+INSERT only, and contains no UPDATE, no REPLACE, no overwriting upsert and no
+DELETE.
 
 That deliberately differs from SQLiteHistoricalMarketDataStore, which upserts
 because equity history is legitimately restated. The divergence is specified by
