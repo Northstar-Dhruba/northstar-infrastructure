@@ -31,6 +31,16 @@ from northstar_infrastructure.persistence.sqlite_futures_paper_trading_schema im
     FUTURES_PAPER_ORDER_SCHEMA,
     initialize_futures_paper_trading_schema,
 )
+from northstar_infrastructure.persistence.sqlite_futures_product_economics import (
+    FuturesProductEconomicsConflictError,
+    FuturesProductEconomicsStorageError,
+    SQLiteFuturesProductEconomicsRepository,
+    SQLiteFuturesProductEconomicsStore,
+)
+from northstar_infrastructure.persistence.sqlite_futures_product_economics_schema import (
+    FUTURES_PRODUCT_ECONOMICS_SCHEMA,
+    initialize_futures_product_economics_schema,
+)
 from northstar_infrastructure.persistence.sqlite_paper_fill_schema import (
     PAPER_FILL_PORTFOLIO_INDEX,
     PAPER_FILL_SCHEMA,
@@ -68,4 +78,10 @@ __all__ = [
     "SQLiteFuturesPaperOrderRepository",
     "SQLiteFuturesPaperOrderStore",
     "initialize_futures_paper_trading_schema",
+    "FUTURES_PRODUCT_ECONOMICS_SCHEMA",
+    "FuturesProductEconomicsConflictError",
+    "FuturesProductEconomicsStorageError",
+    "SQLiteFuturesProductEconomicsRepository",
+    "SQLiteFuturesProductEconomicsStore",
+    "initialize_futures_product_economics_schema",
 ]
