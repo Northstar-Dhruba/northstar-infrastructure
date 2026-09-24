@@ -18,6 +18,19 @@ from northstar_infrastructure.persistence.sqlite_futures_forward_research_schema
     FUTURES_FORWARD_RESEARCH_RECORD_SCHEMA,
     initialize_futures_forward_research_record_schema,
 )
+from northstar_infrastructure.persistence.sqlite_futures_paper_trading import (
+    FuturesPaperTradingStorageError,
+    SQLiteFuturesPaperFillRepository,
+    SQLiteFuturesPaperFillStore,
+    SQLiteFuturesPaperOrderRepository,
+    SQLiteFuturesPaperOrderStore,
+)
+from northstar_infrastructure.persistence.sqlite_futures_paper_trading_schema import (
+    FUTURES_PAPER_FILL_SCHEMA,
+    FUTURES_PAPER_ORDER_PORTFOLIO_INDEX,
+    FUTURES_PAPER_ORDER_SCHEMA,
+    initialize_futures_paper_trading_schema,
+)
 from northstar_infrastructure.persistence.sqlite_paper_fill_schema import (
     PAPER_FILL_PORTFOLIO_INDEX,
     PAPER_FILL_SCHEMA,
@@ -46,4 +59,13 @@ __all__ = [
     "SQLiteFuturesForwardResearchRecordRepository",
     "SQLiteFuturesForwardResearchRecordStore",
     "initialize_futures_forward_research_record_schema",
+    "FUTURES_PAPER_FILL_SCHEMA",
+    "FUTURES_PAPER_ORDER_PORTFOLIO_INDEX",
+    "FUTURES_PAPER_ORDER_SCHEMA",
+    "FuturesPaperTradingStorageError",
+    "SQLiteFuturesPaperFillRepository",
+    "SQLiteFuturesPaperFillStore",
+    "SQLiteFuturesPaperOrderRepository",
+    "SQLiteFuturesPaperOrderStore",
+    "initialize_futures_paper_trading_schema",
 ]
