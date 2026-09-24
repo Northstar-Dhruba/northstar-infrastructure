@@ -148,6 +148,14 @@ class FakeClient:
     metadata: FakeMetadata = field(default_factory=FakeMetadata)
 
 
+# Long after every session these tests fetch, so none depends on the wall clock.
+_LONG_AFTER = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def _completed_clock() -> datetime:
+    return _LONG_AFTER
+
+
 def _source(
     definitions: list[FakeDefinition] | None = None,
     bars: list[FakeOhlcv] | None = None,
@@ -158,7 +166,10 @@ def _source(
             bars=bars or [],
         )
     )
-    return DatabentoFuturesHistoricalMarketDataSource(_API_KEY, client=client), client
+    return (
+        DatabentoFuturesHistoricalMarketDataSource(_API_KEY, client=client, clock=_completed_clock),
+        client,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1185,7 +1196,10 @@ def _closure_source(
             min_span_days=min_span_days,
         )
     )
-    return DatabentoFuturesHistoricalMarketDataSource(_API_KEY, client=client), client
+    return (
+        DatabentoFuturesHistoricalMarketDataSource(_API_KEY, client=client, clock=_completed_clock),
+        client,
+    )
 
 
 def _definition_calls(client: FakeClient) -> list[dict]:

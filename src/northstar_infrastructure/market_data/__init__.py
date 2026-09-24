@@ -3,6 +3,7 @@
 from northstar_infrastructure.market_data.databento_futures_historical_market_data import (
     DatabentoFuturesHistoricalMarketDataSource,
     DatabentoFuturesHistoricalMarketDataSourceError,
+    FuturesTradingSessionInProgressError,
 )
 from northstar_infrastructure.market_data.exchange_calendar_futures_session import (
     ExchangeCalendarFuturesTradingSessionResolver,
@@ -38,6 +39,7 @@ __all__ = [
     "DatabentoFuturesHistoricalMarketDataSourceError",
     "ExchangeCalendarFuturesTradingSessionResolver",
     "FuturesHistoricalStorageError",
+    "FuturesTradingSessionInProgressError",
     "HistoricalMarketDataSourceError",
     "HistoricalStorageError",
     "SQLiteFuturesHistoricalMarketDataRepository",

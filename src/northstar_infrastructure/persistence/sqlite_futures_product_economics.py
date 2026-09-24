@@ -22,7 +22,11 @@ from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
 
-from northstar_application.ports import FuturesProductEconomicsRepository
+from northstar_application.ports import (
+    FuturesProductEconomicsConflictError,
+    FuturesProductEconomicsRepository,
+    FuturesProductEconomicsStore,
+)
 from northstar_core.foundation.value_objects import Currency, ExchangeCode, Symbol
 from northstar_core.futures import (
     FuturesPointValue,
@@ -50,10 +54,6 @@ _DECODE_ERRORS = (TypeError, ValueError, ArithmeticError)
 
 class FuturesProductEconomicsStorageError(RuntimeError):
     """Raised when the local futures product economics store is unavailable or malformed."""
-
-
-class FuturesProductEconomicsConflictError(ValueError):
-    """Raised when different economics are stored under an existing product reference."""
 
 
 def _key(reference: FuturesProductReference) -> tuple[str, str]:
@@ -95,7 +95,7 @@ def _select(connection: sqlite3.Connection, reference: FuturesProductReference) 
     return None if row is None else tuple(row)
 
 
-class SQLiteFuturesProductEconomicsStore:
+class SQLiteFuturesProductEconomicsStore(FuturesProductEconomicsStore):
     """Persist futures product economics into a local SQLite store, insert only."""
 
     def __init__(self, database_path: str | Path) -> None:
