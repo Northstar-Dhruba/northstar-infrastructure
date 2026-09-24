@@ -8,7 +8,13 @@ from decimal import ROUND_DOWN, Decimal, localcontext
 from pathlib import Path
 
 import pytest
-from northstar_application.ports import FuturesProductEconomicsRepository
+from northstar_application.ports import (
+    FuturesProductEconomicsConflictError as ApplicationConflictError,
+)
+from northstar_application.ports import (
+    FuturesProductEconomicsRepository,
+    FuturesProductEconomicsStore,
+)
 from northstar_core.derivatives import ExpirationDate
 from northstar_core.foundation.value_objects import Currency, ExchangeCode, Symbol
 from northstar_core.futures import (
@@ -410,6 +416,37 @@ def test_the_repository_writes_no_rows(database: Path, monkeypatch: pytest.Monke
 
 def test_the_repository_implements_the_application_port() -> None:
     assert issubclass(SQLiteFuturesProductEconomicsRepository, FuturesProductEconomicsRepository)
+
+
+def test_the_store_implements_the_application_port(database: Path) -> None:
+    assert issubclass(SQLiteFuturesProductEconomicsStore, FuturesProductEconomicsStore)
+    assert isinstance(SQLiteFuturesProductEconomicsStore(database), FuturesProductEconomicsStore)
+
+
+def test_the_conflict_error_is_the_applications_own_class() -> None:
+    assert FuturesProductEconomicsConflictError is ApplicationConflictError
+    assert persistence.FuturesProductEconomicsConflictError is ApplicationConflictError
+    assert ApplicationConflictError.__module__.startswith("northstar_application.ports")
+    assert "FuturesProductEconomicsConflictError" not in {
+        node.name for node in ast.walk(_tree(module)) if isinstance(node, ast.ClassDef)
+    }
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [_economics(amount="51"), _economics(currency="EUR")],
+    ids=["amount", "currency"],
+)
+def test_a_conflict_raises_the_application_error(
+    database: Path, changed: FuturesProductEconomics
+) -> None:
+    _store(database, _ES_ECONOMICS)
+
+    with pytest.raises(ApplicationConflictError):
+        _store(database, changed)
+
+    assert _store(database, _ES_ECONOMICS) == 1
+    assert _get(database) == _ES_ECONOMICS
 
 
 # ---------------------------------------------------------------------------

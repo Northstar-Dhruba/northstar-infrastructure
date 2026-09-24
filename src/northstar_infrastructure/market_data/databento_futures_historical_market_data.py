@@ -22,10 +22,23 @@ Prices arrive as signed integer fixed-point at 1e-9 and are converted through
 an explicit coefficient/exponent construction, never through a float and never
 through arithmetic that could round under the caller's decimal context.
 Timestamps are translated with integer nanosecond arithmetic.
+
+Completed sessions only
+-----------------------
+A session is fetched only once the current UTC instant is strictly after its
+resolved ``closes_at``. Before that the provider may hold only part of the
+session, and folding it would persist a partial daily bar stamped as if the
+session had completed. The check uses the resolved close -- early closes and
+sessions opening on the previous civil day included -- and runs before any
+provider request. It proves only that the exchange session has ended, not that
+Databento has finished publishing it; no publication delay is assumed. The
+clock is injected so the rule is deterministic under test; it is the only
+clock read in this adapter.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, ClassVar
@@ -71,6 +84,30 @@ class DatabentoFuturesHistoricalMarketDataSourceError(RuntimeError):
     """Raised when Databento is unavailable or returns data Northstar cannot accept."""
 
 
+class FuturesTradingSessionInProgressError(ValueError):
+    """Raised when a session is requested before its resolved close has passed.
+
+    Nothing was requested from the provider. A session that has not started yet
+    is not complete either and is refused the same way.
+    """
+
+    def __init__(
+        self, contract: FuturesContract, session: FuturesTradingSession, current_utc: datetime
+    ) -> None:
+        self.trading_date = session.trading_date
+        self.session_close = session.closes_at
+        self.current_utc = current_utc
+        super().__init__(
+            f"Futures trading session {session.trading_date.isoformat()} for {contract} "
+            f"has not completed: session close {session.closes_at}, current UTC "
+            f"{current_utc.isoformat()}."
+        )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class DatabentoFuturesHistoricalMarketDataSource(FuturesHistoricalMarketDataSource):
     """Acquire one futures contract's minute bars for one session from Databento.
 
@@ -100,7 +137,15 @@ class DatabentoFuturesHistoricalMarketDataSource(FuturesHistoricalMarketDataSour
         "COMEX": "America/Chicago",
     }
 
-    def __init__(self, api_key: str, *, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        client: Any | None = None,
+        clock: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        if not callable(clock):
+            raise TypeError("DatabentoFuturesHistoricalMarketDataSource clock must be callable.")
         if client is None:
             if not isinstance(api_key, str) or not api_key.strip():
                 raise DatabentoFuturesHistoricalMarketDataSourceError(
@@ -108,6 +153,7 @@ class DatabentoFuturesHistoricalMarketDataSource(FuturesHistoricalMarketDataSour
                 )
             client = dbento.Historical(api_key)
         self._client = client
+        self._clock = clock
         self._resolved: dict[FuturesContract, str] = {}
         self._availability_range: tuple[date, date] | None = None
 
@@ -132,6 +178,7 @@ class DatabentoFuturesHistoricalMarketDataSource(FuturesHistoricalMarketDataSour
                 "DatabentoFuturesHistoricalMarketDataSource session "
                 "must be a FuturesTradingSession."
             )
+        self._require_completed(contract, session)
 
         raw_symbol = self._raw_symbol(contract)
 
@@ -168,6 +215,17 @@ class DatabentoFuturesHistoricalMarketDataSource(FuturesHistoricalMarketDataSour
     # ------------------------------------------------------------------
     # Identity resolution
     # ------------------------------------------------------------------
+
+    def _require_completed(self, contract: FuturesContract, session: FuturesTradingSession) -> None:
+        """Refuse a session unless the current UTC instant is strictly after its close."""
+        now = self._clock()
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise TypeError(
+                "DatabentoFuturesHistoricalMarketDataSource clock must return an aware datetime."
+            )
+        now = now.astimezone(UTC)
+        if now <= _as_utc(session.closes_at):
+            raise FuturesTradingSessionInProgressError(contract, session, now)
 
     def _raw_symbol(self, contract: FuturesContract) -> str:
         """Resolve one contract to its provider symbol, independently of any session.
@@ -262,7 +320,7 @@ class DatabentoFuturesHistoricalMarketDataSource(FuturesHistoricalMarketDataSour
 
         The bound comes from the provider's own availability rather than a
         clock. Reading the wall clock would make resolution depend on when it
-        ran, and this adapter reads no clock.
+        ran; the injected clock is used only by the completed-session guard.
         """
         available_start, available_end = self._availability()
 
