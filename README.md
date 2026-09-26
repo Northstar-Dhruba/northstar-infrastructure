@@ -1,62 +1,51 @@
 # Northstar Infrastructure
 
-**Northstar Platform Infrastructure Layer — Technical Adapters and External Integrations**
+`northstar-infrastructure` contains concrete technical adapters that fulfill ports owned by `northstar-application`.
 
-## Purpose
+## Implemented in Alpha v0.4
 
-`northstar-infrastructure` owns concrete technical implementations and external integrations for Northstar Platform v1.1.0. It provides technical adapters that fulfill Application-owned Port abstractions.
+- `YahooFinanceMarketObservationSource` under `market_data` for live market observations.
+- `YahooHistoricalMarketDataSource` for acquiring bounded historical daily OHLCV observations.
+- `ExchangeCalendarTradingSessionResolver` under `exchanges` for exchange-accurate session completion resolution.
+- `SQLiteHistoricalMarketDataRepository` for deterministic local historical research reads.
+- `SQLiteHistoricalMarketDataStore` for atomic, idempotent historical research data persistence.
+- Infrastructure-owned SQLite schema initialization for generic OHLCV observations.
+- Yahoo Finance chart-data transport using the Python standard library.
+- Translation of bounded daily market responses into Core/Application contracts.
+- Explicit handling of provider unavailability, unknown symbols, incomplete observations, invalid values, timestamps, and required metadata.
+- Deterministic adapter, repository, store, and exchange session tests; tests do not require live network access.
 
-It exists to encapsulate all technical mechanisms (databases, protocols, transport formats, messaging systems, external APIs) so that business rules in `northstar-core` and orchestration logic in `northstar-application` remain pure and technology-agnostic.
+## Current Scope
 
-## Responsibilities
+The repository supports the one-asset market-observation integration and the Epic 6 historical research data pipeline (acquisition, storage, and retrieval). Historical reads are provider-independent and use a local SQLite store keyed by symbol, exchange, timeframe, and point in time.
 
-- **Broker Adapters:** Implementing broker communication and order lifecycle adapters.
-- **Exchange Adapters:** Implementing exchange venue connectivity and market feed integration.
-- **Persistence:** Implementing repository and unit-of-work abstractions for database storage.
-- **Messaging:** Implementing message transports, event publishing, and bus integrations.
-- **REST & WebSocket:** Implementing HTTP/REST and real-time streaming clients/servers.
-- **FIX Protocol:** Implementing FIX protocol engine integrations and session management.
-- **Configuration:** Managing environment configuration, secret loading, and runtime settings.
-
-## Adapter Philosophy
-
-- **Ports and Adapters:** Application Layer defines the Port interface; Infrastructure provides the Adapter implementation.
-- **Data Translation:** Infrastructure adapters translate technical protocol messages (FIX tags, JSON, DB rows) into/from Application and Domain contracts.
-- **No Business Logic in Adapters:** Adapters translate technical mechanics and call Domain/Application boundaries; they do NOT evaluate business invariants or make trading decisions.
+Infrastructure owns provider communication, local storage schema, response parsing, and technical failure translation. It does not own recommendation policy, AssetAnalysis interpretation, or application orchestration. The generic repository and store can coexist with future derivatives-specific historical models without claiming that the current schema models futures or options contract identity.
 
 ## Dependency Direction
 
-- **Inward Dependency:** `northstar-infrastructure` depends inward on `northstar-application` ports and `northstar-core` Domain abstractions.
-- **Zero Inward Leakage:** Neither `northstar-core` nor `northstar-application` ever imports or depends on concrete classes in `northstar-infrastructure`.
-- **Wired at Composition Root:** Infrastructure adapters are instantiated and bound to Application ports at the application composition root (e.g. `northstar-api` or startup CLI).
+Infrastructure depends inward on `northstar-application` ports and `northstar-core` Domain contracts. Core and Application do not depend on Infrastructure implementations.
 
-## Repository Structure
+## Future Infrastructure
 
-```text
-src/
-    northstar_infrastructure/
-        brokers/        # Broker-specific adapter implementations
-        exchanges/      # Exchange venue adapter implementations
-        persistence/    # Database repositories & storage adapters
-        messaging/      # Message bus & queue transport adapters
-        rest/           # HTTP/REST clients and transport adapters
-        websocket/      # WebSocket streaming adapters
-        fix/            # FIX protocol engine integration
-        configuration/  # Setting loaders & environment management
-tests/                  # Automated test suite matching Northstar standards
-docs/                   # Infrastructure layer documentation
+The following areas are architectural placeholders or future capabilities, not implemented Alpha adapters:
+
+- broker and exchange integrations;
+- persistence and databases;
+- messaging and event transports;
+- REST/WebSocket infrastructure beyond the current provider transport;
+- FIX integrations;
+- configuration and secret-management services;
+- additional market-data providers.
+
+## Development
+
+Use `uv sync`, then run:
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run python -m pytest
+uv lock --check
 ```
 
-## Engineering Rules
-
-1. **Implement Ports Only:** Every adapter must implement an explicit Application-owned port contract.
-2. **Translation at Boundary:** Perform technical translation at the edge. Keep internal types pure.
-3. **Constructor Injection:** Inject technical clients and connection factories through constructors.
-4. **Clean Architecture:** Respect the dependency inversion principle without exception.
-5. **Isolated Testing:** Test adapters against mock/stub technical endpoints or embedded test containers.
-
-## Governance & Reference Documents
-
-- [Architecture Handbook v2.0](../docs/architecture/Architecture-Handbook-v2.0.md)
-- [Application Layer Design Specification v1.0](../docs/architecture/Application-Layer-Design-Specification-v1.0.md)
-- [Northstar Architecture v2.0](../docs/architecture/Northstar-Architecture-v2.0.md)
+See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for repository workflow and engineering rules.
