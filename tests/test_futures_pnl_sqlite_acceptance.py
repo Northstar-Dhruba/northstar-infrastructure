@@ -1,6 +1,6 @@
-"""Acceptance: futures product economics and gross simulated P&L on real SQLite.
+"""Acceptance: futures contract economics and gross simulated P&L on real SQLite.
 
-Market bars, frozen forward decisions, paper orders, paper fills and product
+Market bars, frozen forward decisions, paper orders, paper fills and contract
 economics live in real temporary SQLite files and are written and read only
 through the production adapters. Every adapter is constructed afresh for every
 call, so nothing depends on process memory. There is no provider, no network,
@@ -12,11 +12,14 @@ positions marked at the latest persisted daily CLOSE observable at the cutoff.
 No commission, fee, slippage, tax, financing or margin is modelled, and the
 mark is not a settlement price.
 
-Product economics are test fixtures, not exchange metadata:
+Contract economics are test fixtures, not exchange metadata. Each is keyed by
+the complete dated contract, so expiries of one product can differ:
 
-    ES@CME        50 USD / point / contract
-    FESX@EUREX    25 EUR / point / contract
-    ES@EUREX       7 EUR / point / contract   (same code, other exchange)
+    ES@CME        2026-12-18 and 2027-03-19   50 USD / point / contract
+    FESX@EUREX    2026-12-18                  25 EUR / point / contract
+    ES@EUREX      2026-12-18                   7 EUR / point / contract
+    NIFTY@NSE     2025-11-25                  75 INR / point / contract
+    NIFTY@NSE     2026-01-27                  65 INR / point / contract
 
 Most paper facts are stored directly through the SQLite order and fill stores
 so fill quotes are exact; one compact case runs the 9.9 execution pipeline to
@@ -45,9 +48,9 @@ from northstar_application.application_services import (
     BuildFuturesPaperTradingValuationUseCase,
     CalculateFuturesRealizedPnlUseCase,
     FreezeFuturesForwardResearchDecisionUseCase,
+    FuturesContractEconomicsNotFoundError,
     FuturesContractPnl,
     FuturesPaperTradingValuation,
-    FuturesProductEconomicsNotFoundError,
     RunFuturesPaperTradingDecisionUseCase,
     ValueFuturesPaperPortfolioUseCase,
 )
@@ -67,6 +70,7 @@ from northstar_core.foundation.value_objects import (
 )
 from northstar_core.futures import (
     FuturesContract,
+    FuturesContractEconomics,
     FuturesOHLCVBar,
     FuturesPointValue,
     FuturesProductEconomics,
@@ -91,15 +95,17 @@ from northstar_infrastructure.market_data import (
     initialize_futures_market_data_schema,
 )
 from northstar_infrastructure.persistence import (
-    FuturesProductEconomicsConflictError,
+    FuturesContractEconomicsConflictError,
+    SQLiteFuturesContractEconomicsRepository,
+    SQLiteFuturesContractEconomicsStore,
     SQLiteFuturesForwardResearchRecordRepository,
     SQLiteFuturesForwardResearchRecordStore,
     SQLiteFuturesPaperFillRepository,
     SQLiteFuturesPaperFillStore,
     SQLiteFuturesPaperOrderRepository,
     SQLiteFuturesPaperOrderStore,
-    SQLiteFuturesProductEconomicsRepository,
     SQLiteFuturesProductEconomicsStore,
+    initialize_futures_contract_economics_schema,
     initialize_futures_forward_research_record_schema,
     initialize_futures_paper_trading_schema,
     initialize_futures_product_economics_schema,
@@ -107,6 +113,7 @@ from northstar_infrastructure.persistence import (
 
 _USD = Currency("USD")
 _EUR = Currency("EUR")
+_INR = Currency("INR")
 _DAILY = Timeframe("1d")
 _ES = FuturesProductReference(Symbol("ES"), ExchangeCode("CME"))
 _FESX = FuturesProductReference(Symbol("FESX"), ExchangeCode("EUREX"))
@@ -114,9 +121,19 @@ _ES_EUREX = FuturesProductReference(Symbol("ES"), ExchangeCode("EUREX"))
 _ES_DEC = FuturesContract(_ES, ExpirationDate("2026-12-18"))
 _ES_MAR = FuturesContract(_ES, ExpirationDate("2027-03-19"))
 _FESX_DEC = FuturesContract(_FESX, ExpirationDate("2026-12-18"))
-_ES_ECONOMICS = FuturesProductEconomics(_ES, FuturesPointValue(Decimal("50"), _USD))
-_FESX_ECONOMICS = FuturesProductEconomics(_FESX, FuturesPointValue(Decimal("25"), _EUR))
-_ES_EUREX_ECONOMICS = FuturesProductEconomics(_ES_EUREX, FuturesPointValue(Decimal("7"), _EUR))
+_ES_EUREX_DEC = FuturesContract(_ES_EUREX, ExpirationDate("2026-12-18"))
+_NIFTY = FuturesProductReference(Symbol("NIFTY"), ExchangeCode("NSE"))
+_NIFTY_NOV = FuturesContract(_NIFTY, ExpirationDate("2025-11-25"))
+_NIFTY_JAN = FuturesContract(_NIFTY, ExpirationDate("2026-01-27"))
+_ES_POINT = FuturesPointValue(Decimal("50"), _USD)
+_ES_DEC_ECONOMICS = FuturesContractEconomics(_ES_DEC, _ES_POINT)
+_ES_MAR_ECONOMICS = FuturesContractEconomics(_ES_MAR, _ES_POINT)
+_FESX_DEC_ECONOMICS = FuturesContractEconomics(_FESX_DEC, FuturesPointValue(Decimal("25"), _EUR))
+_ES_EUREX_DEC_ECONOMICS = FuturesContractEconomics(
+    _ES_EUREX_DEC, FuturesPointValue(Decimal("7"), _EUR)
+)
+_NIFTY_NOV_ECONOMICS = FuturesContractEconomics(_NIFTY_NOV, FuturesPointValue(Decimal("75"), _INR))
+_NIFTY_JAN_ECONOMICS = FuturesContractEconomics(_NIFTY_JAN, FuturesPointValue(Decimal("65"), _INR))
 _ALPHA = StrategyIdentity("alpha")
 _BETA = StrategyIdentity("beta")
 _PORTFOLIO = PaperPortfolioIdentity("futures-pnl-alpha")
@@ -143,6 +160,10 @@ def _eur(amount: str) -> Money:
     return Money(Decimal(amount), _EUR)
 
 
+def _inr(amount: str) -> Money:
+    return Money(Decimal(amount), _INR)
+
+
 def _quote(value: str) -> QuoteValue:
     return QuoteValue(Decimal(value))
 
@@ -161,18 +182,22 @@ def _initialize(path: Path) -> None:
         initialize_futures_market_data_schema(connection)
         initialize_futures_forward_research_record_schema(connection)
         initialize_futures_paper_trading_schema(connection)
-        initialize_futures_product_economics_schema(connection)
+        initialize_futures_contract_economics_schema(connection)
 
 
 def _database(
     tmp_path: Path,
     name: str = "pnl",
-    economics: tuple[FuturesProductEconomics, ...] = (_ES_ECONOMICS, _FESX_ECONOMICS),
+    economics: tuple[FuturesContractEconomics, ...] = (
+        _ES_DEC_ECONOMICS,
+        _ES_MAR_ECONOMICS,
+        _FESX_DEC_ECONOMICS,
+    ),
 ) -> Path:
     path = tmp_path / f"{name}.sqlite3"
     _initialize(path)
     if economics:
-        assert SQLiteFuturesProductEconomicsStore(path).store(economics) == len(economics)
+        assert SQLiteFuturesContractEconomicsStore(path).store(economics) == len(economics)
     return path
 
 
@@ -274,7 +299,7 @@ def _valuation(
         "order_repository": SQLiteFuturesPaperOrderRepository(path),
         "fill_repository": SQLiteFuturesPaperFillRepository(path),
         "market_repository": SQLiteFuturesHistoricalMarketDataRepository(path),
-        "economics_repository": SQLiteFuturesProductEconomicsRepository(path),
+        "economics_repository": SQLiteFuturesContractEconomicsRepository(path),
         **overrides,
     }
     return BuildFuturesPaperTradingValuationUseCase(**ports).execute(_PORTFOLIO, strategy, through)
@@ -311,7 +336,7 @@ _REQUIRED_TABLES = {
     "futures_forward_research_records",
     "futures_paper_orders",
     "futures_paper_fills",
-    "futures_product_economics",
+    "futures_contract_economics",
 }
 
 
@@ -329,8 +354,8 @@ def test_all_five_tables_coexist_without_changing_each_other(tmp_path: Path) -> 
 
     assert before <= after
     assert {name for _, name, _ in after - before} == {
-        "futures_product_economics",
-        "sqlite_autoindex_futures_product_economics_1",
+        "futures_contract_economics",
+        "sqlite_autoindex_futures_contract_economics_1",
     }
     assert {name for kind, name, _ in after if kind == "table"} == _REQUIRED_TABLES
 
@@ -353,44 +378,67 @@ def test_pnl_stays_derived_and_valuation_writes_nothing(tmp_path: Path) -> None:
 
 
 def test_economics_persist_as_exact_text_and_survive_restart(tmp_path: Path) -> None:
-    precise = FuturesProductEconomics(
-        FuturesProductReference(Symbol("HP"), ExchangeCode("CME")),
+    precise = FuturesContractEconomics(
+        FuturesContract(
+            FuturesProductReference(Symbol("HP"), ExchangeCode("CME")),
+            ExpirationDate("2026-12-18"),
+        ),
         FuturesPointValue(Decimal("12.345678901234567890123456789012345678901234567890123"), _USD),
     )
-    stored = (_ES_ECONOMICS, _FESX_ECONOMICS, _ES_EUREX_ECONOMICS, precise)
+    stored = (
+        _ES_DEC_ECONOMICS,
+        _ES_MAR_ECONOMICS,
+        _FESX_DEC_ECONOMICS,
+        _ES_EUREX_DEC_ECONOMICS,
+        _NIFTY_NOV_ECONOMICS,
+        _NIFTY_JAN_ECONOMICS,
+        precise,
+    )
     path = _database(tmp_path, economics=stored)
 
     for economics in stored:
-        assert SQLiteFuturesProductEconomicsRepository(path).get_economics(economics.reference) == (
+        assert SQLiteFuturesContractEconomicsRepository(path).get_economics(economics.contract) == (
             economics
         )
-    assert SQLiteFuturesProductEconomicsRepository(path).get_economics(_ES_EUREX) != _ES_ECONOMICS
-    assert sorted(_query(path, "SELECT * FROM futures_product_economics")) == [
-        ("ES", "CME", "50", "USD"),
-        ("ES", "EUREX", "7", "EUR"),
-        ("FESX", "EUREX", "25", "EUR"),
-        ("HP", "CME", "12.345678901234567890123456789012345678901234567890123", "USD"),
+    assert (
+        SQLiteFuturesContractEconomicsRepository(path).get_economics(_ES_EUREX_DEC)
+        != _ES_DEC_ECONOMICS
+    )
+    assert sorted(_query(path, "SELECT * FROM futures_contract_economics")) == [
+        ("ES", "CME", "2026-12-18", "50", "USD"),
+        ("ES", "CME", "2027-03-19", "50", "USD"),
+        ("ES", "EUREX", "2026-12-18", "7", "EUR"),
+        ("FESX", "EUREX", "2026-12-18", "25", "EUR"),
+        (
+            "HP",
+            "CME",
+            "2026-12-18",
+            "12.345678901234567890123456789012345678901234567890123",
+            "USD",
+        ),
+        ("NIFTY", "NSE", "2025-11-25", "75", "INR"),
+        ("NIFTY", "NSE", "2026-01-27", "65", "INR"),
     ]
     assert _query(
         path,
-        "SELECT DISTINCT typeof(point_value_amount), typeof(settlement_currency) "
-        "FROM futures_product_economics",
-    ) == [("text", "text")]
+        "SELECT DISTINCT typeof(expiration_date), typeof(point_value_amount), "
+        "typeof(settlement_currency) FROM futures_contract_economics",
+    ) == [("text", "text", "text")]
 
 
 def test_economics_are_insert_only(tmp_path: Path) -> None:
     path = _database(tmp_path)
-    rows = sorted(_query(path, "SELECT * FROM futures_product_economics"))
+    rows = sorted(_query(path, "SELECT * FROM futures_contract_economics"))
 
-    assert SQLiteFuturesProductEconomicsStore(path).store((_ES_ECONOMICS,)) == 1
+    assert SQLiteFuturesContractEconomicsStore(path).store((_ES_DEC_ECONOMICS,)) == 1
     for changed in (
-        FuturesProductEconomics(_ES, FuturesPointValue(Decimal("5"), _USD)),
-        FuturesProductEconomics(_ES, FuturesPointValue(Decimal("50"), _EUR)),
+        FuturesContractEconomics(_ES_DEC, FuturesPointValue(Decimal("5"), _USD)),
+        FuturesContractEconomics(_ES_DEC, FuturesPointValue(Decimal("50"), _EUR)),
     ):
-        with pytest.raises(FuturesProductEconomicsConflictError):
-            SQLiteFuturesProductEconomicsStore(path).store((changed,))
+        with pytest.raises(FuturesContractEconomicsConflictError):
+            SQLiteFuturesContractEconomicsStore(path).store((changed,))
 
-    assert sorted(_query(path, "SELECT * FROM futures_product_economics")) == rows
+    assert sorted(_query(path, "SELECT * FROM futures_contract_economics")) == rows
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +553,8 @@ def test_point_value_is_applied_once_to_accumulated_points(tmp_path: Path) -> No
     point_value = Decimal("3.333333333333333333333333337")
     first, second = "0.1428571428571428571428571429", "3.666666666666666666666666667"
     path = _database(
-        tmp_path, economics=(FuturesProductEconomics(_ES, FuturesPointValue(point_value, _USD)),)
+        tmp_path,
+        economics=(FuturesContractEconomics(_ES_DEC, FuturesPointValue(point_value, _USD)),),
     )
     _trades(path, (BUY, 1, "0"), (SELL, 1, first), (BUY, 1, "0"), (SELL, 1, second))
 
@@ -541,13 +590,13 @@ def test_realized_and_unrealized_components_match_the_valuation(tmp_path: Path) 
     _trade(path, BUY, 2, "5000", _day(6), contract=_FESX_DEC)
     _store_bars(path, _bar(_day(9), "120"), _bar(_day(9), "5010", _FESX_DEC))
     fills = SQLiteFuturesPaperFillRepository(path).get_fills(FuturesPaperFillQuery(_PORTFOLIO))
-    economics = SQLiteFuturesProductEconomicsRepository(path)
+    economics = SQLiteFuturesContractEconomicsRepository(path)
 
     realized = CalculateFuturesRealizedPnlUseCase().execute(
         _PORTFOLIO,
         _ALPHA,
         fills,
-        (economics.get_economics(_ES), economics.get_economics(_FESX)),
+        (economics.get_economics(_ES_DEC), economics.get_economics(_FESX_DEC)),
         _T,
     )
     portfolio = BuildFuturesPaperPortfolioUseCase().execute(_PORTFOLIO, _ALPHA, fills, _T)
@@ -673,8 +722,8 @@ def test_flat_and_unavailable_contracts_stay_distinct_in_one_valuation(tmp_path:
         assert not hasattr(valuation, name)
 
 
-def test_expiries_share_one_economics_row_but_not_positions_or_marks(tmp_path: Path) -> None:
-    path = _database(tmp_path, economics=(_ES_ECONOMICS,))
+def test_each_expiry_has_its_own_economics_row_position_and_mark(tmp_path: Path) -> None:
+    path = _database(tmp_path, economics=(_ES_DEC_ECONOMICS, _ES_MAR_ECONOMICS))
     _trade(path, BUY, 1, "100", _day(2), contract=_ES_DEC)
     _trade(path, BUY, 1, "100", _day(3), contract=_ES_MAR)
     _store_bars(path, _bar(_day(9), "110", _ES_DEC), _bar(_day(9), "90", _ES_MAR))
@@ -689,20 +738,85 @@ def test_expiries_share_one_economics_row_but_not_positions_or_marks(tmp_path: P
         (_ES_DEC, _usd("500")),
         (_ES_MAR, _usd("-500")),
     ]
-    assert _query(path, "SELECT * FROM futures_product_economics") == [("ES", "CME", "50", "USD")]
+    assert sorted(_query(path, "SELECT * FROM futures_contract_economics")) == [
+        ("ES", "CME", "2026-12-18", "50", "USD"),
+        ("ES", "CME", "2027-03-19", "50", "USD"),
+    ]
 
 
-def test_missing_economics_for_a_visible_product_fails_the_valuation(tmp_path: Path) -> None:
-    path = _database(tmp_path, economics=(_ES_ECONOMICS,))
+def test_two_nifty_expiries_value_at_their_own_point_values_beside_es(tmp_path: Path) -> None:
+    """INDIA-1 acceptance: NOV at 75 INR, JAN at 65 INR and ES DEC at 50 USD on real SQLite."""
+    path = _database(
+        tmp_path, economics=(_NIFTY_NOV_ECONOMICS, _NIFTY_JAN_ECONOMICS, _ES_DEC_ECONOMICS)
+    )
+    _trade(path, BUY, 2, "24000", _day(2), contract=_NIFTY_NOV)
+    _trade(path, SELL, 1, "24040", _day(3), contract=_NIFTY_NOV)
+    _trade(path, SELL, 3, "24100", _day(4), contract=_NIFTY_JAN)
+    _trade(path, BUY, 2, "24080", _day(5), contract=_NIFTY_JAN)
+    _trade(path, BUY, 1, "100", _day(6), contract=_ES_DEC)
+    _store_bars(
+        path,
+        _bar(_day(9), "24010", _NIFTY_NOV),
+        _bar(_day(9), "24120", _NIFTY_JAN),
+        _bar(_day(9), "110", _ES_DEC),
+    )
+
+    valuation = _valuation(path)
+    nov, jan, es = (_row(valuation, c) for c in (_NIFTY_NOV, _NIFTY_JAN, _ES_DEC))
+
+    # NOV: realized (24040 - 24000) * 1 * 75; unrealized (24010 - 24000) * 1 * 75.
+    assert (nov.realized_pnl, nov.unrealized_pnl) == (_inr("3000"), _inr("750"))
+    # JAN: realized 20 * 2 * 65; unrealized -20 * 1 * 65. At NOV's 75: 3000 and -1500.
+    assert (jan.realized_pnl, jan.unrealized_pnl) == (_inr("2600"), _inr("-1300"))
+    assert (es.realized_pnl, es.unrealized_pnl) == (_usd("0"), _usd("500"))
+    assert nov.settlement_currency == jan.settlement_currency == _INR
+    for name in ("total_pnl", "gross_pnl", "total_realized", "total_unrealized"):
+        assert not hasattr(valuation, name)
+    copy = tmp_path / "restarted.sqlite3"
+    shutil.copyfile(path, copy)
+    assert _valuation(copy) == valuation
+
+
+def test_a_configured_expiry_never_values_its_unconfigured_sibling(tmp_path: Path) -> None:
+    path = _database(tmp_path, economics=(_NIFTY_NOV_ECONOMICS,))
+    _trade(path, BUY, 1, "24000", _day(2), contract=_NIFTY_NOV)
+    _trade(path, BUY, 1, "24000", _day(3), contract=_NIFTY_JAN)
+
+    with pytest.raises(FuturesContractEconomicsNotFoundError, match="NIFTY@NSE 2026-01-27") as info:
+        _valuation(path)
+
+    assert info.value.contract == _NIFTY_JAN
+
+
+def test_legacy_product_economics_are_never_read_for_pnl(tmp_path: Path) -> None:
+    path = _database(tmp_path, economics=())
+    with sqlite3.connect(path) as connection:
+        initialize_futures_product_economics_schema(connection)
+    SQLiteFuturesProductEconomicsStore(path).store(
+        (FuturesProductEconomics(_NIFTY, FuturesPointValue(Decimal("75"), _INR)),)
+    )
+    _trade(path, BUY, 1, "24000", _day(2), contract=_NIFTY_NOV)
+
+    with pytest.raises(FuturesContractEconomicsNotFoundError) as info:
+        _valuation(path)
+
+    assert info.value.contract == _NIFTY_NOV
+    assert _query(path, "SELECT * FROM futures_product_economics") == [
+        ("NIFTY", "NSE", "75", "INR")
+    ]
+
+
+def test_missing_economics_for_a_visible_contract_fails_the_valuation(tmp_path: Path) -> None:
+    path = _database(tmp_path, economics=(_ES_DEC_ECONOMICS,))
     _trade(path, BUY, 1, "100", _day(2))
     _trade(path, BUY, 1, "5000", _day(3), contract=_FESX_DEC)
 
-    with pytest.raises(FuturesProductEconomicsNotFoundError, match="FESX@EUREX"):
+    with pytest.raises(FuturesContractEconomicsNotFoundError, match="FESX@EUREX 2026-12-18"):
         _valuation(path)
 
 
-def test_a_future_only_product_needs_no_economics_until_visible(tmp_path: Path) -> None:
-    path = _database(tmp_path, economics=(_ES_ECONOMICS,))
+def test_a_future_only_contract_needs_no_economics_until_visible(tmp_path: Path) -> None:
+    path = _database(tmp_path, economics=(_ES_DEC_ECONOMICS,))
     _trade(path, BUY, 1, "100", _day(2))
     _trade(path, BUY, 1, "5000", _day(25), contract=_FESX_DEC)
 
@@ -710,7 +824,7 @@ def test_a_future_only_product_needs_no_economics_until_visible(tmp_path: Path) 
 
     assert [row.contract for row in valuation.contracts] == [_ES_DEC]
     assert valuation.portfolio.get_position(_FESX_DEC) is None
-    with pytest.raises(FuturesProductEconomicsNotFoundError):
+    with pytest.raises(FuturesContractEconomicsNotFoundError):
         _valuation(path, _day(26))
 
 
@@ -720,8 +834,8 @@ def test_a_future_only_product_needs_no_economics_until_visible(tmp_path: Path) 
 
 
 def _precise_database(tmp_path: Path) -> Path:
-    economics = FuturesProductEconomics(
-        _ES, FuturesPointValue(Decimal("12.34567890123456789012345678"), _USD)
+    economics = FuturesContractEconomics(
+        _ES_DEC, FuturesPointValue(Decimal("12.34567890123456789012345678"), _USD)
     )
     path = _database(tmp_path, "precise", economics=(economics,))
     _trades(
@@ -754,7 +868,7 @@ def test_the_valuation_ignores_the_callers_decimal_context(
 def test_a_copied_database_rebuilds_an_equal_valuation(tmp_path: Path) -> None:
     path = _precise_database(tmp_path)
     _trade(path, SELL, 2, "5000", _day(6), contract=_FESX_DEC)
-    SQLiteFuturesProductEconomicsStore(path).store((_FESX_ECONOMICS,))
+    SQLiteFuturesContractEconomicsStore(path).store((_FESX_DEC_ECONOMICS,))
     original = _valuation(path)
 
     copy = tmp_path / "restarted.sqlite3"
@@ -773,9 +887,9 @@ def test_changed_economics_conflict_and_the_valuation_is_unchanged(tmp_path: Pat
     _trades(path, (BUY, 2, "100"), (SELL, 1, "110"))
     before = _valuation(path)
 
-    with pytest.raises(FuturesProductEconomicsConflictError):
-        SQLiteFuturesProductEconomicsStore(path).store(
-            (FuturesProductEconomics(_ES, FuturesPointValue(Decimal("20"), _USD)),)
+    with pytest.raises(FuturesContractEconomicsConflictError):
+        SQLiteFuturesContractEconomicsStore(path).store(
+            (FuturesContractEconomics(_ES_DEC, FuturesPointValue(Decimal("20"), _USD)),)
         )
 
     assert _valuation(path) == before
@@ -813,14 +927,14 @@ def test_a_pending_order_has_no_pnl(tmp_path: Path) -> None:
     assert _count(path, "futures_paper_orders") == 2
 
 
-class _CountingEconomics(SQLiteFuturesProductEconomicsRepository):
+class _CountingEconomics(SQLiteFuturesContractEconomicsRepository):
     def __init__(self, path: Path) -> None:
         super().__init__(path)
-        self.calls: list[FuturesProductReference] = []
+        self.calls: list[FuturesContract] = []
 
-    def get_economics(self, reference):
-        self.calls.append(reference)
-        return super().get_economics(reference)
+    def get_economics(self, contract):
+        self.calls.append(contract)
+        return super().get_economics(contract)
 
 
 class _CountingMarket(SQLiteFuturesHistoricalMarketDataRepository):
@@ -881,7 +995,7 @@ def _session(number: int) -> PointInTime:
 
 
 def test_a_back_filled_next_bar_never_repairs_the_filled_pnl(tmp_path: Path) -> None:
-    path = _database(tmp_path, economics=(_ES_ECONOMICS,))
+    path = _database(tmp_path, economics=(_ES_DEC_ECONOMICS,))
     closes = ["7600"] * 15 + [str(7601 + index) for index in range(10)]
     _store_bars(
         path,

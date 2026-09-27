@@ -1,5 +1,12 @@
 """SQLite-backed futures product economics store and repository.
 
+Historical reference only. These adapters read and write the product-level
+``futures_product_economics`` table of the original ES reference MVP, which is
+kept exactly as it was so that history recorded under that model stays
+readable. They are not the profit and loss authority and are wired into no
+runtime: P&L resolves SQLiteFuturesContractEconomicsRepository, keyed by the
+complete contract, and never falls back to a row here.
+
 Stored economics are frozen reference facts. This module issues INSERT only --
 no UPDATE, no REPLACE, no overwriting upsert and no DELETE. Storing economics
 equal to a stored row is an idempotent success; storing different economics

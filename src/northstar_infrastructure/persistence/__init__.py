@@ -9,6 +9,16 @@ from northstar_infrastructure.persistence.sqlite_forward_research_schema import 
     FORWARD_RESEARCH_RECORD_SCHEMA,
     initialize_forward_research_record_schema,
 )
+from northstar_infrastructure.persistence.sqlite_futures_contract_economics import (
+    FuturesContractEconomicsConflictError,
+    FuturesContractEconomicsStorageError,
+    SQLiteFuturesContractEconomicsRepository,
+    SQLiteFuturesContractEconomicsStore,
+)
+from northstar_infrastructure.persistence.sqlite_futures_contract_economics_schema import (
+    FUTURES_CONTRACT_ECONOMICS_SCHEMA,
+    initialize_futures_contract_economics_schema,
+)
 from northstar_infrastructure.persistence.sqlite_futures_forward_research_records import (
     FuturesForwardResearchStorageError,
     SQLiteFuturesForwardResearchRecordRepository,
@@ -84,4 +94,10 @@ __all__ = [
     "SQLiteFuturesProductEconomicsRepository",
     "SQLiteFuturesProductEconomicsStore",
     "initialize_futures_product_economics_schema",
+    "FUTURES_CONTRACT_ECONOMICS_SCHEMA",
+    "FuturesContractEconomicsConflictError",
+    "FuturesContractEconomicsStorageError",
+    "SQLiteFuturesContractEconomicsRepository",
+    "SQLiteFuturesContractEconomicsStore",
+    "initialize_futures_contract_economics_schema",
 ]
