@@ -29,6 +29,20 @@ from northstar_infrastructure.market_data.sqlite_schema import (
     HISTORICAL_MARKET_DATA_SCHEMA,
     initialize_historical_market_data_schema,
 )
+from northstar_infrastructure.market_data.upstox_futures_native_daily_market_data import (
+    UpstoxFuturesNativeDailyMarketDataSource,
+)
+from northstar_infrastructure.market_data.upstox_http import (
+    UpstoxAccessBlockedError,
+    UpstoxAuthenticationError,
+    UpstoxInstrumentResolutionError,
+    UpstoxInvalidInstrumentKeyError,
+    UpstoxMarketDataSourceError,
+    UpstoxProviderUnavailableError,
+)
+from northstar_infrastructure.market_data.upstox_instrument_master import (
+    UpstoxInstrumentMaster,
+)
 from northstar_infrastructure.market_data.yahoo_finance import YahooFinanceMarketObservationSource
 from northstar_infrastructure.market_data.yahoo_historical_market_data import (
     HistoricalMarketDataSourceError,
@@ -50,6 +64,14 @@ __all__ = [
     "SQLiteFuturesHistoricalMarketDataStore",
     "SQLiteHistoricalMarketDataRepository",
     "SQLiteHistoricalMarketDataStore",
+    "UpstoxAccessBlockedError",
+    "UpstoxAuthenticationError",
+    "UpstoxFuturesNativeDailyMarketDataSource",
+    "UpstoxInstrumentMaster",
+    "UpstoxInstrumentResolutionError",
+    "UpstoxInvalidInstrumentKeyError",
+    "UpstoxMarketDataSourceError",
+    "UpstoxProviderUnavailableError",
     "YahooFinanceMarketObservationSource",
     "YahooHistoricalMarketDataSource",
     "initialize_futures_market_data_schema",
