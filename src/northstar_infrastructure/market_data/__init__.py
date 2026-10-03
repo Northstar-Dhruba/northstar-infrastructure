@@ -29,6 +29,16 @@ from northstar_infrastructure.market_data.sqlite_schema import (
     HISTORICAL_MARKET_DATA_SCHEMA,
     initialize_historical_market_data_schema,
 )
+from northstar_infrastructure.market_data.upstox_candle_evidence import (
+    MalformedUpstoxCandleEvidenceError,
+    TruncatedUpstoxCandleEvidenceError,
+    UpstoxCandleEvidenceError,
+    UpstoxCandleEvidenceLog,
+    UpstoxCandleEvidenceLogError,
+    UpstoxDailyCandleEvidence,
+    UpstoxDailyCandleEvidenceCollector,
+    UpstoxDailyCandleEvidenceObservation,
+)
 from northstar_infrastructure.market_data.upstox_futures_native_daily_market_data import (
     UpstoxFuturesNativeDailyMarketDataSource,
 )
@@ -59,13 +69,21 @@ __all__ = [
     "FuturesTradingSessionInProgressError",
     "HistoricalMarketDataSourceError",
     "HistoricalStorageError",
+    "MalformedUpstoxCandleEvidenceError",
     "NSEFuturesTradingSessionResolver",
     "SQLiteFuturesHistoricalMarketDataRepository",
     "SQLiteFuturesHistoricalMarketDataStore",
     "SQLiteHistoricalMarketDataRepository",
     "SQLiteHistoricalMarketDataStore",
+    "TruncatedUpstoxCandleEvidenceError",
     "UpstoxAccessBlockedError",
     "UpstoxAuthenticationError",
+    "UpstoxCandleEvidenceError",
+    "UpstoxCandleEvidenceLog",
+    "UpstoxCandleEvidenceLogError",
+    "UpstoxDailyCandleEvidence",
+    "UpstoxDailyCandleEvidenceCollector",
+    "UpstoxDailyCandleEvidenceObservation",
     "UpstoxFuturesNativeDailyMarketDataSource",
     "UpstoxInstrumentMaster",
     "UpstoxInstrumentResolutionError",
