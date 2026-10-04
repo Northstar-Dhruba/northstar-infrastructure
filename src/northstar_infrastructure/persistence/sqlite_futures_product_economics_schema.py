@@ -1,6 +1,11 @@
 """Schema definition for the local futures product economics store.
 
-Economics are product-level: every expiry of a product shares them, so the key
+Historical reference only: this table is the product-level economics of the
+original ES reference MVP and is left exactly as it was, never altered,
+migrated or dropped. Profit and loss reads ``futures_contract_economics``,
+keyed by the complete contract, and never reads this table.
+
+Economics here are product-level: every expiry of a product shares them, so the key
 is the FuturesProductReference alone -- ``(product_code, exchange_code)`` -- as
 a composite PRIMARY KEY. There is no expiration column, and ES@CME and ES on
 another exchange are different keys.
