@@ -22,10 +22,10 @@ Reuse
 -----
 HTTP, the explicit User-Agent, JSON decoding with ``parse_float=Decimal`` and
 error classification come from ``upstox_http``; instrument resolution from
-``UpstoxInstrumentMaster``; the candle URL, the success check, the venue-date
-reading of a candle label and exact numbers from the native daily adapter.
-Every provider failure therefore raises exactly the error the canonical
-adapter would.
+``UpstoxInstrumentMaster``; the date-routed candle request, the success
+check, the venue-date reading of a candle label and exact numbers from the
+native daily adapter's ``fetch_daily_candles``. Every provider failure
+therefore raises exactly the error the canonical adapter would.
 
 Time is evidence here
 ---------------------
@@ -34,6 +34,12 @@ was made. The clock is injected -- there is no default -- and read twice:
 ``requested_at`` immediately before the candle request and ``received_at``
 immediately after the response. Both must be timezone-aware; they are recorded
 as canonical UTC. Nothing here reads the wall clock itself.
+
+``requested_at`` also routes the request. Its civil date in the venue's
+timezone is the current venue date: observing that date asks Upstox's
+current-day endpoint, which serves the trading day in progress or just closed;
+observing any other date asks the historical endpoint. Which endpoint answered
+a record therefore follows from its ``trading_date`` and ``requested_at``.
 
 The record
 ----------
@@ -78,24 +84,20 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from northstar_core.foundation.value_objects import PointInTime
 from northstar_core.futures import FuturesContract
 
 from northstar_infrastructure.market_data.upstox_futures_native_daily_market_data import (
-    _CANDLE_LENGTH,
-    _HISTORICAL_CANDLE_URL,
-    _candles,
+    UpstoxLabelledDailyCandle,
     _number,
-    _trading_date,
+    fetch_daily_candles,
 )
 from northstar_infrastructure.market_data.upstox_http import (
     UpstoxFetch,
     UpstoxMarketDataSourceError,
     default_fetch,
-    get_json,
 )
 from northstar_infrastructure.market_data.upstox_instrument_master import (
     UpstoxInstrumentMaster,
@@ -325,23 +327,23 @@ class UpstoxDailyCandleEvidenceCollector:
         zone = ZoneInfo(upstox_venue(contract).timezone)
         instrument = self._master.resolve_future(contract)
         context = f"{contract} daily candle evidence {trading_date.isoformat()}"
-        url = _HISTORICAL_CANDLE_URL.format(
-            key=quote(instrument.instrument_key, safe=""),
-            to=trading_date.isoformat(),
-            start=trading_date.isoformat(),
-        )
 
         requested_at = _require_instant(self._clock(), "requested_at")
-        payload = get_json(self._fetch, url, self._headers, self._timeout, context=context)
+        candles = fetch_daily_candles(
+            self._fetch,
+            self._headers,
+            self._timeout,
+            instrument.instrument_key,
+            zone,
+            trading_date,
+            trading_date,
+            context,
+            current_date=requested_at.astimezone(zone).date(),
+            error=UpstoxCandleEvidenceError,
+        )
         received_at = _require_instant(self._clock(), "received_at")
 
-        candles = _candles(payload, context)
-        if len(candles) > 1:
-            raise UpstoxCandleEvidenceError(
-                f"Upstox returned {len(candles)} candles for {context}; exactly one or none "
-                "answers a single trading date, so nothing was recorded."
-            )
-        candle = _candle(candles[0], zone, trading_date, context) if candles else None
+        candle = _candle(candles[0]) if candles else None
         volume_contracts, note = (
             _volume_contracts(candle.volume, instrument.lot_size) if candle else (None, None)
         )
@@ -358,30 +360,19 @@ class UpstoxDailyCandleEvidenceCollector:
         )
 
 
-def _candle(
-    raw: Any, zone: ZoneInfo, trading_date: date, context: str
-) -> UpstoxDailyCandleEvidence:
-    if not isinstance(raw, list) or len(raw) != _CANDLE_LENGTH:
-        raise UpstoxCandleEvidenceError(
-            f"Upstox candle for {context} is malformed; expected "
-            "[timestamp, open, high, low, close, volume, open_interest]."
-        )
-    label, open_raw, high_raw, low_raw, close_raw, volume_raw, interest_raw = raw
-    labelled = _trading_date(label, 0, zone, context)
-    if labelled != trading_date:
-        raise UpstoxCandleEvidenceError(
-            f"Upstox returned a candle labelled {labelled.isoformat()} for {context}; "
-            "nothing was recorded."
-        )
+def _candle(labelled: UpstoxLabelledDailyCandle) -> UpstoxDailyCandleEvidence:
+    """Exact numbers of a shape-checked candle already matched to the observed date."""
+    index, context = labelled.index, labelled.context
+    label, open_raw, high_raw, low_raw, close_raw, volume_raw, interest_raw = labelled.candle
     return UpstoxDailyCandleEvidence(
         provider_timestamp=label,
-        open=_number(open_raw, "open", 0, context),
-        high=_number(high_raw, "high", 0, context),
-        low=_number(low_raw, "low", 0, context),
-        close=_number(close_raw, "close", 0, context),
-        volume=_number(volume_raw, "volume", 0, context),
+        open=_number(open_raw, "open", index, context),
+        high=_number(high_raw, "high", index, context),
+        low=_number(low_raw, "low", index, context),
+        close=_number(close_raw, "close", index, context),
+        volume=_number(volume_raw, "volume", index, context),
         open_interest=(
-            None if interest_raw is None else _number(interest_raw, "open_interest", 0, context)
+            None if interest_raw is None else _number(interest_raw, "open_interest", index, context)
         ),
     )
 

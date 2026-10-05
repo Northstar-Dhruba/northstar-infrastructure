@@ -233,7 +233,8 @@ def test_a_successful_response_without_a_candle_is_evidence() -> None:
     ids=["two-candles", "another-date"],
 )
 def test_more_than_one_or_another_dates_candle_is_refused(candles: list) -> None:
-    with pytest.raises(UpstoxCandleEvidenceError, match="nothing was recorded"):
+    # Observed on its own venue date, so the current-day endpoint answered.
+    with pytest.raises(UpstoxCandleEvidenceError, match="must be labelled 2026-10-05"):
         _observe(candles)
 
 
@@ -547,3 +548,97 @@ def test_a_master_with_the_contract_resolves_its_current_lot_size() -> None:
     record = _record(_collector(fetch, Clock(_at(10), _at(10, 0, 1))).observe(_NIFTY_OCT, _MON))
 
     assert (record["lot_size"], record["volume_contracts"]) == ("75", "10")
+
+
+# ---------------------------------------------------------------------------
+# Routing by the venue date of requested_at
+# ---------------------------------------------------------------------------
+
+_NOT_CALLED = AssertionError("this endpoint must not be called")
+_HISTORICAL_MONDAY = (
+    "https://api.upstox.com/v3/historical-candle/NSE_FO%7C48704/days/1/2026-10-05/2026-10-05"
+)
+_CURRENT_DAY = "https://api.upstox.com/v3/historical-candle/intraday/NSE_FO%7C48704/days/1"
+_V1_KEYS = {
+    "schema", "collector", "provider", "requested_at", "received_at", "contract",
+    "trading_date", "instrument_key", "lot_size", "request", "candle",
+    "volume_contracts", "volume_contracts_note",
+}  # fmt: skip
+
+
+def _urls(fetch: FakeFetch) -> list[str]:
+    return [call[0] for call in fetch.candle_calls()]
+
+
+def test_observing_the_venue_date_uses_the_current_day_endpoint_only() -> None:
+    fetch = FakeFetch(
+        candles=_success([_candle(_MON, close=1)]),
+        current_day=_success([_candle(_MON, close=25230, volume=4700 * _LOT)]),
+    )
+
+    record = _record(_observe(fetch=fetch, instants=(_at(12), _at(12, 0, 1))))
+
+    assert _urls(fetch) == [_CURRENT_DAY]
+    assert record["candle"]["close"] == "25230"
+    assert record["volume_contracts"] == "4700"
+    assert record["trading_date"] == "2026-10-05"
+    assert set(record) == _V1_KEYS
+
+
+def test_observing_a_past_date_uses_the_historical_endpoint_only() -> None:
+    fetch = FakeFetch(candles=_success([_candle(_MON)]), current_day_error=_NOT_CALLED)
+    next_day = (
+        datetime(2026, 10, 6, 6, 0, tzinfo=UTC),
+        datetime(2026, 10, 6, 6, 0, 1, tzinfo=UTC),
+    )
+
+    record = _record(_observe(fetch=fetch, instants=next_day))
+
+    assert _urls(fetch) == [_HISTORICAL_MONDAY]
+    assert record["candle"]["close"] == "25180.5"
+
+
+def test_a_missing_past_candle_is_recorded_absent_without_the_current_day_endpoint() -> None:
+    fetch = FakeFetch(candles=_success([]), current_day_error=_NOT_CALLED)
+    next_day = (
+        datetime(2026, 10, 6, 6, 0, tzinfo=UTC),
+        datetime(2026, 10, 6, 6, 0, 1, tzinfo=UTC),
+    )
+
+    record = _record(_observe(fetch=fetch, instants=next_day))
+
+    assert record["candle"] is None
+    assert _urls(fetch) == [_HISTORICAL_MONDAY]
+
+
+@pytest.mark.parametrize(
+    ("requested", "url"),
+    [
+        (datetime(2026, 10, 5, 18, 29, 59, tzinfo=UTC), _CURRENT_DAY),  # 23:59:59 IST
+        (datetime(2026, 10, 5, 18, 30, 0, tzinfo=UTC), _HISTORICAL_MONDAY),  # 00:00 IST
+    ],
+    ids=["before-ist-midnight", "at-ist-midnight"],
+)
+def test_the_routing_date_turns_at_ist_midnight(requested: datetime, url: str) -> None:
+    fetch = FakeFetch(candles=_success([_candle(_MON)]), current_day=_success([_candle(_MON)]))
+
+    _observe(fetch=fetch, instants=(requested, requested + timedelta(seconds=1)))
+
+    assert _urls(fetch) == [url]
+
+
+def test_the_v1_record_shape_is_unchanged_on_both_routes() -> None:
+    today = _record(_observe())
+    past = _record(
+        _observe(
+            instants=(
+                datetime(2026, 10, 6, 6, 0, tzinfo=UTC),
+                datetime(2026, 10, 6, 6, 0, 1, tzinfo=UTC),
+            )
+        )
+    )
+
+    for record in (today, past):
+        assert set(record) == _V1_KEYS
+        assert set(record["request"]) == {"interval", "from", "to"}
+        assert record["schema"] == _SCHEMA

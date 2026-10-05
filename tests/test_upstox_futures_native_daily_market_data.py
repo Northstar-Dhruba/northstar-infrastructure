@@ -228,11 +228,16 @@ class FakeFetch:
         candles: object = None,
         candle_error: Exception | None = None,
         master_error: Exception | None = None,
+        current_day: object = None,
+        current_day_error: Exception | None = None,
     ) -> None:
         self.master = _gzip_json(_master_records()) if master is None else master
         self.candles = _success(_week()) if candles is None else candles
         self.candle_error = candle_error
         self.master_error = master_error
+        # The current-day endpoint answers like the historical one unless told otherwise.
+        self.current_day = current_day
+        self.current_day_error = current_day_error
         self.calls: list[tuple[str, dict[str, str], float]] = []
 
     def __call__(self, url: str, headers: dict[str, str], timeout: float) -> bytes:
@@ -241,6 +246,11 @@ class FakeFetch:
             if self.master_error is not None:
                 raise self.master_error
             return self.master
+        if url.startswith("https://api.upstox.com/v3/historical-candle/intraday/"):
+            error = self.current_day_error or self.candle_error
+            if error is not None:
+                raise error
+            return self.candles if self.current_day is None else self.current_day
         if url.startswith("https://api.upstox.com/v3/historical-candle/"):
             if self.candle_error is not None:
                 raise self.candle_error
@@ -1147,6 +1157,7 @@ def test_no_broker_or_order_endpoint_is_present(module: Any) -> None:
     allowed = {
         "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
         "https://api.upstox.com/v3/historical-candle/{key}/days/1/{to}/{start}",
+        "https://api.upstox.com/v3/historical-candle/intraday/{key}/days/1",
     }
     assert urls <= allowed
     for url in urls:
@@ -1203,3 +1214,261 @@ def test_acquisition_stamps_upstox_candles_at_the_nse_session_close(tmp_path: Pa
         Quantity(Decimal(4700)),
     ]
     assert all(bar.contract == _NIFTY_OCT for bar in bars)
+
+
+# ---------------------------------------------------------------------------
+# Date routing: the current venue date comes from Upstox's current-day endpoint
+# ---------------------------------------------------------------------------
+
+_CURRENT_DAY_URL = "https://api.upstox.com/v3/historical-candle/intraday/NSE_FO%7C48704/days/1"
+_ON_MONDAY = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)  # 17:30 IST on Monday 2026-10-05
+_ON_TUESDAY = datetime(2026, 10, 6, 6, 0, tzinfo=UTC)  # 11:30 IST on Tuesday 2026-10-06
+_NOT_CALLED = AssertionError("the current-day endpoint must not be called")
+
+
+def _routed(fetch: FakeFetch, instant: datetime | None) -> UpstoxFuturesNativeDailyMarketDataSource:
+    return UpstoxFuturesNativeDailyMarketDataSource(_TOKEN, fetch=fetch, current_instant=instant)
+
+
+def _historical_url(start: date, end: date) -> str:
+    return (
+        "https://api.upstox.com/v3/historical-candle/NSE_FO%7C48704/days/1/"
+        f"{end.isoformat()}/{start.isoformat()}"
+    )
+
+
+def _past_week() -> list[list[object]]:
+    """The historical answer up to Thursday."""
+    return [entry for entry in _week() if not entry[0].startswith(_MON.isoformat())]
+
+
+def _candle_urls(fetch: FakeFetch) -> list[str]:
+    return [call[0] for call in fetch.candle_calls()]
+
+
+def test_without_a_current_instant_every_date_is_historical() -> None:
+    fetch = FakeFetch(current_day_error=_NOT_CALLED)
+
+    observations = _routed(fetch, None).fetch_daily_observations(_NIFTY_OCT, _TUE, _MON)
+
+    assert [o.trading_date for o in observations] == [_TUE, _WED, _THU, _MON]
+    assert _candle_urls(fetch) == [_historical_url(_TUE, _MON)]
+
+
+def test_a_range_before_the_current_date_is_historical_only() -> None:
+    fetch = FakeFetch(current_day_error=_NOT_CALLED)
+
+    observations = _routed(fetch, _ON_TUESDAY).fetch_daily_observations(_NIFTY_OCT, _TUE, _MON)
+
+    assert [o.trading_date for o in observations] == [_TUE, _WED, _THU, _MON]
+    assert _candle_urls(fetch) == [_historical_url(_TUE, _MON)]
+
+
+def test_a_missing_past_candle_never_reaches_the_current_day_endpoint() -> None:
+    fetch = FakeFetch(candles=_success(_past_week()), current_day_error=_NOT_CALLED)
+
+    observations = _routed(fetch, _ON_TUESDAY).fetch_daily_observations(_NIFTY_OCT, _TUE, _MON)
+
+    assert [o.trading_date for o in observations] == [_TUE, _WED, _THU]
+    assert _candle_urls(fetch) == [_historical_url(_TUE, _MON)]
+
+
+def test_the_current_date_alone_uses_only_the_current_day_endpoint() -> None:
+    fetch = FakeFetch(
+        candles=_success([_candle(_MON, close=1)]),
+        current_day=_success([_candle(_MON, close=25230, volume=4700 * _LOT)]),
+    )
+
+    (observation,) = _routed(fetch, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _MON, _MON)
+
+    assert _candle_urls(fetch) == [_CURRENT_DAY_URL]
+    assert (observation.trading_date, observation.close) == (_MON, QuoteValue(Decimal(25230)))
+    assert observation.volume == Quantity(Decimal(4700))
+
+
+def test_past_dates_and_the_current_date_merge_deterministically() -> None:
+    fetch = FakeFetch(
+        candles=_success(_past_week()),
+        current_day=_success([_candle(_MON, close=25230, volume=4700 * _LOT)]),
+    )
+
+    observations = _routed(fetch, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _TUE, _MON)
+
+    assert _candle_urls(fetch) == [_historical_url(_TUE, date(2026, 10, 4)), _CURRENT_DAY_URL]
+    assert [o.trading_date for o in observations] == [_TUE, _WED, _THU, _MON]
+    assert [o.close for o in observations] == [
+        QuoteValue(Decimal("25180.5")),
+        QuoteValue(Decimal(25200)),
+        QuoteValue(Decimal(25150)),
+        QuoteValue(Decimal(25230)),
+    ]
+
+
+def test_no_current_day_candle_yet_leaves_the_current_date_absent() -> None:
+    fetch = FakeFetch(candles=_success(_past_week()), current_day=_success([]))
+
+    observations = _routed(fetch, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _TUE, _MON)
+
+    assert [o.trading_date for o in observations] == [_TUE, _WED, _THU]
+
+
+def test_dates_after_the_current_date_are_never_answered_by_its_candle() -> None:
+    wednesday = date(2026, 10, 7)
+    fetch = FakeFetch(candles=_success([_candle(_THU)]), current_day=_success([_candle(_MON)]))
+
+    observations = _routed(fetch, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _THU, wednesday)
+
+    assert [o.trading_date for o in observations] == [_THU, _MON]
+    assert _candle_urls(fetch) == [_historical_url(_THU, date(2026, 10, 4)), _CURRENT_DAY_URL]
+
+    # A range wholly after the current date stays historical, as before.
+    future = FakeFetch(candles=_success([]), current_day_error=_NOT_CALLED)
+    _routed(future, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, date(2026, 10, 6), wednesday)
+    assert _candle_urls(future) == [_historical_url(date(2026, 10, 6), wednesday)]
+
+
+@pytest.mark.parametrize("label", [_THU, date(2026, 10, 6)], ids=["earlier", "later"])
+def test_a_current_day_candle_for_another_date_is_refused(label: date) -> None:
+    fetch = FakeFetch(candles=_success([]), current_day=_success([_candle(label)]))
+
+    with pytest.raises(UpstoxMarketDataSourceError, match="must be labelled 2026-10-05"):
+        _routed(fetch, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _MON, _MON)
+
+
+def test_malformed_or_duplicated_current_day_candles_fail() -> None:
+    malformed = FakeFetch(current_day=_success([[_MON.isoformat(), 1]]))
+    with pytest.raises(UpstoxMarketDataSourceError, match="candle 0"):
+        _routed(malformed, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _MON, _MON)
+
+    duplicated = FakeFetch(current_day=_success([_candle(_MON), _candle(_MON, close=1)]))
+    with pytest.raises(UpstoxMarketDataSourceError, match="more than one candle"):
+        _routed(duplicated, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _MON, _MON)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (_http_error(_CURRENT_DAY_URL, 403, b"error code: 1010"), UpstoxAccessBlockedError),
+        (
+            _http_error(
+                _CURRENT_DAY_URL, 400, _error_body("UDAPI100011", "Invalid Instrument key")
+            ),
+            UpstoxInvalidInstrumentKeyError,
+        ),
+        (
+            _http_error(_CURRENT_DAY_URL, 401, _error_body("UDAPI100050", "Invalid token")),
+            UpstoxAuthenticationError,
+        ),
+        (_http_error(_CURRENT_DAY_URL, 429), UpstoxProviderUnavailableError),
+        (_http_error(_CURRENT_DAY_URL, 503), UpstoxProviderUnavailableError),
+        (URLError("down"), UpstoxProviderUnavailableError),
+    ],
+    ids=[
+        "cloudflare",
+        "invalid-instrument",
+        "authentication",
+        "rate-limited",
+        "unavailable",
+        "transport",
+    ],
+)
+def test_current_day_errors_reach_only_ranges_containing_the_current_date(error, expected) -> None:
+    # A past-only range is untouched by a failing current-day endpoint ...
+    past = FakeFetch(current_day_error=error)
+    observations = _routed(past, _ON_TUESDAY).fetch_daily_observations(_NIFTY_OCT, _TUE, _MON)
+    assert [o.trading_date for o in observations] == [_TUE, _WED, _THU, _MON]
+
+    # ... while a range containing the current date surfaces the existing error class.
+    current = FakeFetch(candles=_success(_past_week()), current_day_error=error)
+    with pytest.raises(expected) as raised:
+        _routed(current, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _TUE, _MON)
+    assert "current-day candle 2026-10-05" in str(raised.value)
+    assert _TOKEN not in str(raised.value)
+
+
+def test_current_day_numbers_stay_exact_decimals() -> None:
+    body = (
+        b'{"status": "success", "data": {"candles": [["2026-10-05T00:00:00+05:30", '
+        b"25010.50, 25100.00, 24990.05, 25050.10, 273000, 13500000]]}}"
+    )
+    fetch = FakeFetch(current_day=body)
+
+    (observation,) = _routed(fetch, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _MON, _MON)
+
+    # Exact decimal values, never floats: 24990.05 has no exact binary float.
+    assert observation.open.value == Decimal("25010.50")
+    assert observation.low.value == Decimal("24990.05")
+    assert observation.close.value == Decimal("25050.10")
+    assert observation.volume == Quantity(Decimal(4200))
+
+
+def test_current_day_volume_must_still_be_whole_contracts() -> None:
+    fetch = FakeFetch(current_day=_success([_candle(_MON, volume=4700 * _LOT + 1)]))
+
+    with pytest.raises(UpstoxMarketDataSourceError, match="volume"):
+        _routed(fetch, _ON_MONDAY).fetch_daily_observations(_NIFTY_OCT, _MON, _MON)
+
+
+def test_a_naive_or_non_datetime_current_instant_is_refused() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _routed(FakeFetch(), datetime(2026, 10, 5, 12, 0))
+    with pytest.raises(TypeError, match="datetime or None"):
+        _routed(FakeFetch(), "2026-10-05T12:00:00Z")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("instant", "historical", "current"),
+    [
+        # 23:59:59 IST on 10-05: the venue date is still 10-05.
+        (datetime(2026, 10, 5, 18, 29, 59, tzinfo=UTC), None, _MON),
+        # 00:00:00 IST on 10-06: the venue date has turned.
+        (datetime(2026, 10, 5, 18, 30, 0, tzinfo=UTC), (_MON, _MON), date(2026, 10, 6)),
+    ],
+    ids=["before-ist-midnight", "at-ist-midnight"],
+)
+def test_the_venue_date_turns_at_ist_midnight(instant, historical, current) -> None:
+    fetch = FakeFetch(candles=_success([_candle(_MON)]), current_day=_success([_candle(current)]))
+
+    observations = _routed(fetch, instant).fetch_daily_observations(
+        _NIFTY_OCT, _MON, date(2026, 10, 6)
+    )
+
+    expected_urls = ([_historical_url(*historical)] if historical else []) + [_CURRENT_DAY_URL]
+    assert _candle_urls(fetch) == expected_urls
+    assert observations[-1].trading_date == current
+
+
+def test_the_adapter_reads_no_clock() -> None:
+    calls = {
+        f"{node.func.value.id}.{node.func.attr}"
+        for node in ast.walk(_tree(adapter_module))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+    }
+    assert not {"date.today", "datetime.now", "datetime.utcnow", "datetime.today"} & calls
+
+
+def test_acquisition_covers_the_current_session_when_routed(tmp_path: Path) -> None:
+    database = str(tmp_path / "futures.sqlite3")
+    fetch = FakeFetch(
+        candles=_success(_past_week()),
+        current_day=_success([_candle(_MON, close=25230, volume=4700 * _LOT)]),
+    )
+    use_case = AcquireFuturesNativeDailyHistoryUseCase(
+        NSEFuturesTradingSessionResolver(),
+        _routed(fetch, _ON_MONDAY),
+        SQLiteFuturesHistoricalMarketDataStore(database),
+    )
+
+    result = use_case.execute(FuturesDailyHistoricalAcquisitionQuery(_NIFTY_OCT, _TUE, _MON))
+
+    assert result.session_count == result.daily_bar_count == 4
+    bars = SQLiteFuturesHistoricalMarketDataRepository(database).get_bars(
+        FuturesHistoricalMarketDataQuery(_NIFTY_OCT, Timeframe("1d"))
+    )
+    monday = NSEFuturesTradingSessionResolver().resolve(_NIFTY, _MON)
+    assert (bars[-1].point_in_time, bars[-1].close) == (
+        monday.closes_at,
+        QuoteValue(Decimal(25230)),
+    )

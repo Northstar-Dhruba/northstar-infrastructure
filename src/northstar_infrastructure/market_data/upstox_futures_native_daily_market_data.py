@@ -35,6 +35,21 @@ Open interest
 Each candle's seventh element is open interest. The canonical bar has no field
 for it, so it is neither interpreted nor returned.
 
+The current venue date
+----------------------
+Upstox's historical endpoint does not serve the current trading day; its
+current-day endpoint (``historical-candle/intraday/{key}/days/1``) does. An
+adapter built with ``current_instant`` -- an aware instant captured once by the
+composition root -- routes by date: the venue civil date T of that instant (in
+the venue's timezone, as candle labels are read) is served by the current-day
+endpoint, and only when T lies inside the requested range; dates before T come
+from the historical endpoint; dates after T are not requested and are never
+answered by today's candle. A current-day candle is used only when its own
+label is exactly T. Without ``current_instant`` every date is historical, as
+before. Routing never depends on what a response contains, so a past date with
+no historical candle never reaches the current-day endpoint, and its errors
+reach only a request that needs it.
+
 What this adapter does not decide
 ---------------------------------
 It reads no clock and makes no judgement about whether a candle is final. It
@@ -49,7 +64,8 @@ contract's life is far shorter, so no request is split.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
@@ -78,6 +94,7 @@ from northstar_infrastructure.market_data.upstox_instrument_master import (
 )
 
 _HISTORICAL_CANDLE_URL = "https://api.upstox.com/v3/historical-candle/{key}/days/1/{to}/{start}"
+_CURRENT_DAY_CANDLE_URL = "https://api.upstox.com/v3/historical-candle/intraday/{key}/days/1"
 
 # [timestamp, open, high, low, close, volume, open_interest]
 _CANDLE_LENGTH = 7
@@ -100,6 +117,7 @@ class UpstoxFuturesNativeDailyMarketDataSource(FuturesNativeDailyMarketDataSourc
         instrument_master: UpstoxInstrumentMaster | None = None,
         fetch: UpstoxFetch = default_fetch,
         timeout: float = 10.0,
+        current_instant: datetime | None = None,
     ) -> None:
         if not isinstance(access_token, str) or not access_token.strip():
             raise UpstoxMarketDataSourceError("Upstox access token must be a non-empty string.")
@@ -107,6 +125,17 @@ class UpstoxFuturesNativeDailyMarketDataSource(FuturesNativeDailyMarketDataSourc
             raise UpstoxMarketDataSourceError("Upstox access token must be a single line.")
         if not callable(fetch):
             raise TypeError("UpstoxFuturesNativeDailyMarketDataSource fetch must be callable.")
+        if current_instant is not None:
+            if not isinstance(current_instant, datetime):
+                raise TypeError(
+                    "UpstoxFuturesNativeDailyMarketDataSource current_instant must be a datetime "
+                    "or None."
+                )
+            if current_instant.utcoffset() is None:
+                raise ValueError(
+                    "UpstoxFuturesNativeDailyMarketDataSource current_instant must be "
+                    "timezone-aware."
+                )
         if instrument_master is not None and not isinstance(
             instrument_master, UpstoxInstrumentMaster
         ):
@@ -121,6 +150,7 @@ class UpstoxFuturesNativeDailyMarketDataSource(FuturesNativeDailyMarketDataSourc
         }
         self._fetch = fetch
         self._timeout = timeout
+        self._current_instant = current_instant
         self._master = instrument_master or UpstoxInstrumentMaster(fetch=fetch)
         self._resolved: dict[FuturesContract, UpstoxFuturesInstrument] = {}
 
@@ -155,33 +185,23 @@ class UpstoxFuturesNativeDailyMarketDataSource(FuturesNativeDailyMarketDataSourc
             f"{start_trading_date.isoformat()}..{end_trading_date.isoformat()}"
         )
 
-        url = _HISTORICAL_CANDLE_URL.format(
-            key=quote(instrument.instrument_key, safe=""),
-            to=end_trading_date.isoformat(),
-            start=start_trading_date.isoformat(),
+        current_date = (
+            None if self._current_instant is None else self._current_instant.astimezone(zone).date()
         )
-        payload = get_json(self._fetch, url, self._headers, self._timeout, context=context)
-        candles = _candles(payload, context)
-
-        by_date: dict[date, FuturesNativeDailyObservation] = {}
-        for index, candle in enumerate(candles):
-            observation = _observation(candle, index, contract, instrument, zone, context)
-            label = observation.trading_date
-            if not start_trading_date <= label <= end_trading_date:
-                raise UpstoxMarketDataSourceError(
-                    f"Upstox returned a candle labelled {label.isoformat()} outside the "
-                    f"requested range for {context}."
-                )
-            if label in by_date:
-                raise UpstoxMarketDataSourceError(
-                    f"Upstox returned more than one candle labelled {label.isoformat()} "
-                    f"for {context}."
-                )
-            by_date[label] = observation
-
+        candles = fetch_daily_candles(
+            self._fetch,
+            self._headers,
+            self._timeout,
+            instrument.instrument_key,
+            zone,
+            start_trading_date,
+            end_trading_date,
+            context,
+            current_date=current_date,
+        )
         # Upstox returns newest first. The port does not require an order, but
         # ascending labels make the adapter's own output deterministic.
-        return tuple(by_date[label] for label in sorted(by_date))
+        return tuple(_observation(candle, contract, instrument) for candle in candles)
 
     # ------------------------------------------------------------------
     # Identity resolution
@@ -224,25 +244,121 @@ def _candles(payload: Any, context: str) -> list[Any]:
     return candles
 
 
-def _observation(
-    candle: Any,
-    index: int,
-    contract: FuturesContract,
-    instrument: UpstoxFuturesInstrument,
+@dataclass(frozen=True, slots=True)
+class UpstoxLabelledDailyCandle:
+    """One shape-checked provider candle with its venue trading date.
+
+    ``candle`` is the raw ``[timestamp, open, high, low, close, volume,
+    open_interest]`` list exactly as decoded; ``index`` and ``context`` locate
+    it in its response, for messages.
+    """
+
+    trading_date: date
+    candle: list[Any]
+    index: int
+    context: str
+
+
+def fetch_daily_candles(
+    fetch: UpstoxFetch,
+    headers: dict[str, str],
+    timeout: float,
+    instrument_key: str,
+    zone: ZoneInfo,
+    start_trading_date: date,
+    end_trading_date: date,
+    context: str,
+    *,
+    current_date: date | None,
+    error: type[UpstoxMarketDataSourceError] = UpstoxMarketDataSourceError,
+) -> tuple[UpstoxLabelledDailyCandle, ...]:
+    """Return the provider candles answering the range, routed by date, ascending.
+
+    ``current_date`` is the current venue date T, or None. Dates before T, or
+    every date when T is None or outside the range, come from the historical
+    endpoint; T, when inside the range, comes only from the current-day
+    endpoint; dates after T inside the range are not requested. A historical
+    candle outside its requested range, two candles for one date, or a
+    current-day candle not labelled T raises ``error``. No clock is read.
+    """
+    key = quote(instrument_key, safe="")
+    uses_current_day = (
+        current_date is not None and start_trading_date <= current_date <= end_trading_date
+    )
+    historical_end = current_date - timedelta(days=1) if uses_current_day else end_trading_date
+
+    candles: list[UpstoxLabelledDailyCandle] = []
+    if start_trading_date <= historical_end:
+        url = _HISTORICAL_CANDLE_URL.format(
+            key=key, to=historical_end.isoformat(), start=start_trading_date.isoformat()
+        )
+        payload = get_json(fetch, url, headers, timeout, context=context)
+        for labelled in _labelled(_candles(payload, context), zone, context, error):
+            if not start_trading_date <= labelled.trading_date <= historical_end:
+                raise error(
+                    f"Upstox returned a candle labelled {labelled.trading_date.isoformat()} "
+                    f"outside the requested range for {context}."
+                )
+            candles.append(labelled)
+
+    if uses_current_day:
+        current_context = f"{context} (current-day candle {current_date.isoformat()})"
+        payload = get_json(
+            fetch,
+            _CURRENT_DAY_CANDLE_URL.format(key=key),
+            headers,
+            timeout,
+            context=current_context,
+        )
+        for labelled in _labelled(_candles(payload, current_context), zone, current_context, error):
+            if labelled.trading_date != current_date:
+                raise error(
+                    f"Upstox returned a current-day candle labelled "
+                    f"{labelled.trading_date.isoformat()} for {current_context}; it must be "
+                    f"labelled {current_date.isoformat()}."
+                )
+            candles.append(labelled)
+
+    return tuple(sorted(candles, key=lambda labelled: labelled.trading_date))
+
+
+def _labelled(
+    candles: list[Any],
     zone: ZoneInfo,
     context: str,
+    error: type[UpstoxMarketDataSourceError],
+) -> list[UpstoxLabelledDailyCandle]:
+    """Shape-check each candle and read its venue trading date; one per date."""
+    labelled: list[UpstoxLabelledDailyCandle] = []
+    seen: set[date] = set()
+    for index, candle in enumerate(candles):
+        if not isinstance(candle, list) or len(candle) != _CANDLE_LENGTH:
+            raise error(
+                f"Upstox candle {index} for {context} is malformed; expected "
+                f"[timestamp, open, high, low, close, volume, open_interest]."
+            )
+        label = _trading_date(candle[0], index, zone, context)
+        if label in seen:
+            raise error(
+                f"Upstox returned more than one candle labelled {label.isoformat()} for {context}."
+            )
+        seen.add(label)
+        labelled.append(UpstoxLabelledDailyCandle(label, candle, index, context))
+    return labelled
+
+
+def _observation(
+    labelled: UpstoxLabelledDailyCandle,
+    contract: FuturesContract,
+    instrument: UpstoxFuturesInstrument,
 ) -> FuturesNativeDailyObservation:
-    if not isinstance(candle, list) or len(candle) != _CANDLE_LENGTH:
-        raise UpstoxMarketDataSourceError(
-            f"Upstox candle {index} for {context} is malformed; expected "
-            f"[timestamp, open, high, low, close, volume, open_interest]."
-        )
-    label, open_raw, high_raw, low_raw, close_raw, volume_raw, _open_interest = candle
+    index, context = labelled.index, labelled.context
+    _label, open_raw, high_raw, low_raw, close_raw, volume_raw, _open_interest = labelled.candle
 
     try:
         return FuturesNativeDailyObservation(
             contract=contract,
-            trading_date=_trading_date(label, index, zone, context),
+            trading_date=labelled.trading_date,
             open=QuoteValue(_number(open_raw, "open", index, context)),
             high=QuoteValue(_number(high_raw, "high", index, context)),
             low=QuoteValue(_number(low_raw, "low", index, context)),
