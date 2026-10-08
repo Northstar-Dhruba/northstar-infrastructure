@@ -51,6 +51,16 @@ from northstar_infrastructure.persistence.sqlite_futures_product_economics_schem
     FUTURES_PRODUCT_ECONOMICS_SCHEMA,
     initialize_futures_product_economics_schema,
 )
+from northstar_infrastructure.persistence.sqlite_option_contract_economics import (
+    OptionContractEconomicsConflictError,
+    OptionContractEconomicsStorageError,
+    SQLiteOptionContractEconomicsRepository,
+    SQLiteOptionContractEconomicsStore,
+)
+from northstar_infrastructure.persistence.sqlite_option_contract_economics_schema import (
+    OPTION_CONTRACT_ECONOMICS_SCHEMA,
+    initialize_option_contract_economics_schema,
+)
 from northstar_infrastructure.persistence.sqlite_paper_fill_schema import (
     PAPER_FILL_PORTFOLIO_INDEX,
     PAPER_FILL_SCHEMA,
@@ -100,4 +110,10 @@ __all__ = [
     "SQLiteFuturesContractEconomicsRepository",
     "SQLiteFuturesContractEconomicsStore",
     "initialize_futures_contract_economics_schema",
+    "OPTION_CONTRACT_ECONOMICS_SCHEMA",
+    "OptionContractEconomicsConflictError",
+    "OptionContractEconomicsStorageError",
+    "SQLiteOptionContractEconomicsRepository",
+    "SQLiteOptionContractEconomicsStore",
+    "initialize_option_contract_economics_schema",
 ]
