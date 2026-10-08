@@ -31,6 +31,11 @@ from northstar_infrastructure.market_data.sqlite_historical_market_data import (
     SQLiteHistoricalMarketDataRepository,
     SQLiteHistoricalMarketDataStore,
 )
+from northstar_infrastructure.market_data.sqlite_option_daily_acquisition_store import (
+    OptionOpenInterestCapture,
+    OptionOpenInterestCaptureError,
+    SQLiteOptionDailyAcquisitionStore,
+)
 from northstar_infrastructure.market_data.sqlite_option_historical_market_data import (
     OptionHistoricalStorageError,
     SQLiteOptionHistoricalMarketDataRepository,
@@ -95,6 +100,10 @@ from northstar_infrastructure.market_data.upstox_option_instrument_master import
     UpstoxOptionListing,
     UpstoxOptionMasterError,
     UpstoxOptionMasterSnapshot,
+)
+from northstar_infrastructure.market_data.upstox_option_native_daily_market_data import (
+    OptionProviderListingNotStoredError,
+    UpstoxOptionNativeDailyMarketDataSource,
 )
 from northstar_infrastructure.market_data.yahoo_finance import YahooFinanceMarketObservationSource
 from northstar_infrastructure.market_data.yahoo_historical_market_data import (
@@ -164,4 +173,9 @@ __all__ = [
     "SQLiteOptionProviderOpenInterestStore",
     "initialize_option_market_data_schema",
     "initialize_option_provider_open_interest_schema",
+    "OptionOpenInterestCapture",
+    "OptionOpenInterestCaptureError",
+    "OptionProviderListingNotStoredError",
+    "SQLiteOptionDailyAcquisitionStore",
+    "UpstoxOptionNativeDailyMarketDataSource",
 ]
