@@ -11,6 +11,9 @@ from northstar_infrastructure.market_data.exchange_calendar_futures_session impo
 from northstar_infrastructure.market_data.nse_futures_session import (
     NSEFuturesTradingSessionResolver,
 )
+from northstar_infrastructure.market_data.nse_option_expiration import (
+    NSEOptionExpirationResolver,
+)
 from northstar_infrastructure.market_data.sqlite_futures_historical_market_data import (
     FuturesHistoricalStorageError,
     SQLiteFuturesHistoricalMarketDataRepository,
@@ -71,6 +74,7 @@ __all__ = [
     "HistoricalStorageError",
     "MalformedUpstoxCandleEvidenceError",
     "NSEFuturesTradingSessionResolver",
+    "NSEOptionExpirationResolver",
     "SQLiteFuturesHistoricalMarketDataRepository",
     "SQLiteFuturesHistoricalMarketDataStore",
     "SQLiteHistoricalMarketDataRepository",
