@@ -31,6 +31,9 @@ from northstar_infrastructure.market_data.sqlite_historical_market_data import (
     SQLiteHistoricalMarketDataRepository,
     SQLiteHistoricalMarketDataStore,
 )
+from northstar_infrastructure.market_data.sqlite_option_chain_daily_bars import (
+    SQLiteOptionChainDailyBarRepository,
+)
 from northstar_infrastructure.market_data.sqlite_option_daily_acquisition_store import (
     OptionOpenInterestCapture,
     OptionOpenInterestCaptureError,
@@ -40,6 +43,9 @@ from northstar_infrastructure.market_data.sqlite_option_historical_market_data i
     OptionHistoricalStorageError,
     SQLiteOptionHistoricalMarketDataRepository,
     SQLiteOptionHistoricalMarketDataStore,
+)
+from northstar_infrastructure.market_data.sqlite_option_listed_contracts import (
+    SQLiteOptionListedContractRepository,
 )
 from northstar_infrastructure.market_data.sqlite_option_listing_schema import (
     OPTION_LISTING_SNAPSHOTS_SCHEMA,
@@ -178,4 +184,6 @@ __all__ = [
     "OptionProviderListingNotStoredError",
     "SQLiteOptionDailyAcquisitionStore",
     "UpstoxOptionNativeDailyMarketDataSource",
+    "SQLiteOptionChainDailyBarRepository",
+    "SQLiteOptionListedContractRepository",
 ]
