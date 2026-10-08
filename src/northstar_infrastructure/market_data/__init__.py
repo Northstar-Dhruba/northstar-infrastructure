@@ -14,6 +14,9 @@ from northstar_infrastructure.market_data.nse_futures_session import (
 from northstar_infrastructure.market_data.nse_option_expiration import (
     NSEOptionExpirationResolver,
 )
+from northstar_infrastructure.market_data.nse_option_session import (
+    NSEOptionTradingSessionResolver,
+)
 from northstar_infrastructure.market_data.sqlite_futures_historical_market_data import (
     FuturesHistoricalStorageError,
     SQLiteFuturesHistoricalMarketDataRepository,
@@ -28,10 +31,21 @@ from northstar_infrastructure.market_data.sqlite_historical_market_data import (
     SQLiteHistoricalMarketDataRepository,
     SQLiteHistoricalMarketDataStore,
 )
+from northstar_infrastructure.market_data.sqlite_option_historical_market_data import (
+    OptionHistoricalStorageError,
+    SQLiteOptionHistoricalMarketDataRepository,
+    SQLiteOptionHistoricalMarketDataStore,
+)
 from northstar_infrastructure.market_data.sqlite_option_listing_schema import (
     OPTION_LISTING_SNAPSHOTS_SCHEMA,
     OPTION_PROVIDER_LISTINGS_SCHEMA,
     initialize_option_listing_schema,
+)
+from northstar_infrastructure.market_data.sqlite_option_market_data_schema import (
+    OPTION_OHLCV_SCHEMA,
+    OPTION_PROVIDER_OPEN_INTEREST_SCHEMA,
+    initialize_option_market_data_schema,
+    initialize_option_provider_open_interest_schema,
 )
 from northstar_infrastructure.market_data.sqlite_option_provider_listings import (
     OptionListingConflictError,
@@ -39,6 +53,13 @@ from northstar_infrastructure.market_data.sqlite_option_provider_listings import
     SQLiteOptionListingRepository,
     SQLiteOptionListingStore,
     StoredOptionProviderListing,
+)
+from northstar_infrastructure.market_data.sqlite_option_provider_open_interest import (
+    OptionOpenInterestConflictError,
+    OptionOpenInterestStorageError,
+    ProviderOptionOpenInterest,
+    SQLiteOptionProviderOpenInterestRepository,
+    SQLiteOptionProviderOpenInterestStore,
 )
 from northstar_infrastructure.market_data.sqlite_schema import (
     HISTORICAL_MARKET_DATA_SCHEMA,
@@ -130,4 +151,17 @@ __all__ = [
     "UpstoxOptionMasterError",
     "UpstoxOptionMasterSnapshot",
     "initialize_option_listing_schema",
+    "NSEOptionTradingSessionResolver",
+    "OPTION_OHLCV_SCHEMA",
+    "OPTION_PROVIDER_OPEN_INTEREST_SCHEMA",
+    "OptionHistoricalStorageError",
+    "OptionOpenInterestConflictError",
+    "OptionOpenInterestStorageError",
+    "ProviderOptionOpenInterest",
+    "SQLiteOptionHistoricalMarketDataRepository",
+    "SQLiteOptionHistoricalMarketDataStore",
+    "SQLiteOptionProviderOpenInterestRepository",
+    "SQLiteOptionProviderOpenInterestStore",
+    "initialize_option_market_data_schema",
+    "initialize_option_provider_open_interest_schema",
 ]
