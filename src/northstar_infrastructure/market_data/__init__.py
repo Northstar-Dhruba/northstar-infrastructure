@@ -24,6 +24,24 @@ from northstar_infrastructure.market_data.historical_futures_contract_reference 
     HistoricalFuturesTickSize,
     check_historical_futures_reference_calendar,
 )
+from northstar_infrastructure.market_data.historical_futures_reference_evidence import (
+    PRODUCTION_EVIDENCE_AUTHORITY_PREFIX,
+    TEST_EVIDENCE_AUTHORITY_PREFIX,
+    HistoricalFuturesAcceptedEvidenceRegistry,
+    HistoricalFuturesAcceptedFact,
+    HistoricalFuturesBoundarySemantics,
+    HistoricalFuturesDocumentIdentity,
+    HistoricalFuturesEvidenceCutoffSource,
+    HistoricalFuturesEvidenceError,
+    HistoricalFuturesEvidenceGate,
+    HistoricalFuturesEvidenceRefusedError,
+    HistoricalFuturesFactCategory,
+    HistoricalFuturesOwnerAcceptance,
+    HistoricalFuturesReferenceAuthority,
+)
+from northstar_infrastructure.market_data.nse_accepted_reference_evidence import (
+    PRODUCTION_ACCEPTED_EVIDENCE,
+)
 from northstar_infrastructure.market_data.nse_futures_session import (
     NSEFuturesTradingSessionResolver,
 )
@@ -216,4 +234,18 @@ __all__ = [
     "HistoricalFuturesReferenceUnavailableError",
     "HistoricalFuturesTickSize",
     "check_historical_futures_reference_calendar",
+    "PRODUCTION_ACCEPTED_EVIDENCE",
+    "PRODUCTION_EVIDENCE_AUTHORITY_PREFIX",
+    "TEST_EVIDENCE_AUTHORITY_PREFIX",
+    "HistoricalFuturesAcceptedEvidenceRegistry",
+    "HistoricalFuturesAcceptedFact",
+    "HistoricalFuturesBoundarySemantics",
+    "HistoricalFuturesDocumentIdentity",
+    "HistoricalFuturesEvidenceCutoffSource",
+    "HistoricalFuturesEvidenceError",
+    "HistoricalFuturesEvidenceGate",
+    "HistoricalFuturesEvidenceRefusedError",
+    "HistoricalFuturesFactCategory",
+    "HistoricalFuturesOwnerAcceptance",
+    "HistoricalFuturesReferenceAuthority",
 ]
