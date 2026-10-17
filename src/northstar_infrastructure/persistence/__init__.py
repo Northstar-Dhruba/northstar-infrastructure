@@ -54,10 +54,12 @@ from northstar_infrastructure.persistence.sqlite_futures_product_economics_schem
 from northstar_infrastructure.persistence.sqlite_futures_trade_recommendation_schema import (
     FUTURES_RECOMMENDATION_CONFIGURATION_SCHEMA,
     FUTURES_TRADE_RECOMMENDATION_SCHEMA,
+    FUTURES_TRADE_RECOMMENDATION_STEP_SCHEMA,
     initialize_futures_trade_recommendation_schema,
 )
 from northstar_infrastructure.persistence.sqlite_futures_trade_recommendations import (
     FuturesTradeRecommendationStorageError,
+    SQLiteFuturesTradeRecommendationLifecycleStore,
     SQLiteFuturesTradeRecommendationRepository,
     SQLiteFuturesTradeRecommendationStore,
 )
@@ -128,8 +130,10 @@ __all__ = [
     "initialize_option_contract_economics_schema",
     "FUTURES_RECOMMENDATION_CONFIGURATION_SCHEMA",
     "FUTURES_TRADE_RECOMMENDATION_SCHEMA",
+    "FUTURES_TRADE_RECOMMENDATION_STEP_SCHEMA",
     "initialize_futures_trade_recommendation_schema",
     "FuturesTradeRecommendationStorageError",
+    "SQLiteFuturesTradeRecommendationLifecycleStore",
     "SQLiteFuturesTradeRecommendationRepository",
     "SQLiteFuturesTradeRecommendationStore",
 ]

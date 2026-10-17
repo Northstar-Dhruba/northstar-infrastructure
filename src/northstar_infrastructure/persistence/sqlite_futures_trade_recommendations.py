@@ -1,9 +1,9 @@
-"""SQLite-backed futures trade recommendation definition store and repository.
+"""SQLite-backed futures trade recommendation store, lifecycle store and repository.
 
 Status: an internal persistence capability, not an enabled recording workflow.
 A successful generation must eventually commit its recommendation and its
-generation audit in one transaction (F-5B-2); this slice stores definitions and
-configurations only, and nothing wires it into operations.
+generation audit in one transaction (F-5B-2B); this module stores definitions,
+configurations and lifecycle steps, and nothing wires it into operations.
 
 Recording
 ---------
@@ -19,7 +19,9 @@ the profile. Then, in ONE ``BEGIN IMMEDIATE`` transaction:
    FuturesTradeRecommendationConflictError and nothing is overwritten;
 3. a new recommendation is refused with FuturesTradeRecommendationExclusivityError
    when its product -- product code and exchange, every expiry -- already has
-   another open recommendation, or an earlier one in the same batch;
+   another open recommendation, or an earlier one in the same batch. "Open" is
+   the F-2 status of the other recommendation's lifecycle, replayed from its
+   stored steps inside this transaction;
 4. new definitions are inserted, and the whole batch commits or rolls back.
 
 ``BEGIN IMMEDIATE`` takes the database's write lock before anything is read, so
@@ -28,14 +30,29 @@ holds. A writer waits at most five seconds for that lock; past it the write
 fails as a storage error and nothing is written. The journal mode is left as
 it is. Foreign keys are enforced on this module's own write connections.
 
-Openness, for now
------------------
-F-2 derives terminality from a recommendation's lifecycle events. No events
-are persisted yet, so every stored definition is open, and a product with any
-stored recommendation is blocked. Nothing here infers terminality from validity
-or the clock, and there is no terminality column: F-5B-2 adds insert-only
-lifecycle steps, and openness will become "no terminal step recorded" without
-rewriting any definition. Until then a product is never released.
+Lifecycle progress
+------------------
+``record_progress(previous, current, steps=...)`` first runs the shared
+Application validator, which replays the steps from ``previous`` through Core
+and requires exactly ``current``. Then, in ONE ``BEGIN IMMEDIATE`` transaction:
+
+1. the definition is read and fully validated, configuration seal included,
+   and must be the definition ``previous`` names;
+2. the stored lifecycle is rebuilt by replaying every stored step
+   (sqlite_futures_trade_recommendation_steps);
+3. stored lifecycle equal to ``previous``: each observation step's candle must
+   already be in ``futures_ohlcv`` under the bar's own contract, timeframe and
+   instant, with equal values and an equal ``fdc1`` fingerprint, or
+   FuturesTradeRecommendationLifecycleEvidenceError is raised; the steps are
+   then inserted, numbered on from the last stored one;
+4. otherwise, if exactly these steps were the last ones recorded after
+   ``previous`` -- the stored lifecycle is ``current`` -- it is an idempotent
+   no-op returning 0; anything else is a FuturesTradeRecommendationLifecycleConflictError.
+
+A product is released only by a terminal step: the definition stays as it
+was, its steps stay as they were, and the next recording on that product sees
+the terminal F-2 status. Nothing infers terminality from validity, an expiry
+date or the clock, and a terminal lifecycle accepts no further step.
 
 Evidence
 --------
@@ -46,9 +63,11 @@ configuration row it was recorded under with a SHA-256 digest, so a registered
 configuration that is changed afterwards -- a horizon, a policy parameter --
 invalidates every definition that relied on it. Every read rebuilds the F-2
 recommendation, re-serializes it, and requires the stored text, the columns,
-the configuration seal and the re-derived identity to agree. A row that fails any check
-is corrupt and raises; nothing is repaired. No OHLCV bar is stored, and nothing
-here calls a market-data provider. The module issues INSERT only.
+the configuration seal and the re-derived identity to agree. A lifecycle read
+replays every step against its candle in ``futures_ohlcv`` and requires every
+stored fact to be what F-2 produces. A row that fails any check is corrupt and
+raises; nothing is repaired. No OHLCV bar is copied into recommendation storage,
+and nothing here calls a market-data provider. The module issues INSERT only.
 """
 
 from __future__ import annotations
@@ -56,6 +75,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
@@ -69,10 +89,18 @@ from northstar_application.ports import (
     FuturesTradeRecommendationConfigurationConflictError,
     FuturesTradeRecommendationConflictError,
     FuturesTradeRecommendationExclusivityError,
+    FuturesTradeRecommendationLifecycleConflictError,
+    FuturesTradeRecommendationLifecycleEvidenceError,
+    FuturesTradeRecommendationLifecycleStep,
+    FuturesTradeRecommendationLifecycleStore,
+    FuturesTradeRecommendationObservationStep,
     FuturesTradeRecommendationQuery,
     FuturesTradeRecommendationRepository,
     FuturesTradeRecommendationStore,
+    InvalidFuturesTradeRecommendationLifecycleProgressError,
     InvalidFuturesTradeRecommendationRecordingError,
+    apply_futures_trade_recommendation_lifecycle_step,
+    validate_futures_trade_recommendation_lifecycle_progress,
     validate_futures_trade_recommendation_recording,
 )
 from northstar_core.derivatives import ExpirationDate, QuoteValue
@@ -100,6 +128,14 @@ from northstar_core.strategy import ExplanationReason, StrategyIdentity
 
 from northstar_infrastructure.persistence.sqlite_futures_trade_recommendation_schema import (
     initialize_futures_trade_recommendation_schema,
+)
+from northstar_infrastructure.persistence.sqlite_futures_trade_recommendation_steps import (
+    STEP_COLUMNS,
+    StepRow,
+    candle_fingerprint,
+    load_candle,
+    reconstruct_lifecycle,
+    step_row,
 )
 
 _EVIDENCE_VERSION = 1
@@ -137,10 +173,7 @@ _SELECT_DEFINITION = (
     f"SELECT {', '.join(_DEFINITION_COLUMNS)} FROM futures_trade_recommendations "  # noqa: S608
     "WHERE recommendation_identity = ?"
 )
-_SELECT_OTHER_ON_PRODUCT = (
-    "SELECT recommendation_identity FROM futures_trade_recommendations "
-    "WHERE product_code = ? AND exchange_code = ? AND recommendation_identity <> ? LIMIT 1"
-)
+_SELECT_OTHERS_ON_PRODUCT = f"{_SELECT_BY_PRODUCT} AND r.recommendation_identity <> ?"
 _SELECT_PROFILE = (
     f"SELECT {', '.join(_CONFIGURATION_COLUMNS)} "  # noqa: S608
     "FROM futures_recommendation_configurations WHERE profile_version = ?"
@@ -156,6 +189,10 @@ _INSERT_CONFIGURATION = (
 _INSERT_DEFINITION = (
     "INSERT INTO futures_trade_recommendations "
     f"({', '.join(_DEFINITION_COLUMNS)}) VALUES ({', '.join('?' * len(_DEFINITION_COLUMNS))})"
+)
+_INSERT_STEP = (
+    "INSERT INTO futures_trade_recommendation_steps "
+    f"({', '.join(STEP_COLUMNS)}) VALUES ({', '.join('?' * len(STEP_COLUMNS))})"
 )
 
 _DefinitionRow = tuple[str, ...]
@@ -442,6 +479,21 @@ def _connect(database_path: str) -> sqlite3.Connection:
     return connection
 
 
+def _lifecycle(
+    connection: sqlite3.Connection, row: tuple[object, ...]
+) -> tuple[
+    FuturesTradeRecommendationLifecycle, tuple[FuturesTradeRecommendationLifecycleStep, ...]
+]:
+    """Rebuild a stored recommendation's lifecycle; require every stored fact to agree."""
+    recommendation = _decode(row)
+    try:
+        return reconstruct_lifecycle(connection, recommendation)
+    except _DECODE_ERRORS as exc:
+        raise FuturesTradeRecommendationStorageError(
+            f"Recommendation {recommendation.identity} has invalid lifecycle evidence: {exc}"
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Adapters
 # ---------------------------------------------------------------------------
@@ -537,8 +589,10 @@ class SQLiteFuturesTradeRecommendationStore(FuturesTradeRecommendationStore):
                 )
             return
         product = (row[1], row[2])
-        other = connection.execute(_SELECT_OTHER_ON_PRODUCT, (*product, row[0])).fetchone()
-        if other is not None or product in batch_products:
+        others = connection.execute(_SELECT_OTHERS_ON_PRODUCT, (*product, row[0])).fetchall()
+        if product in batch_products or any(
+            not _lifecycle(connection, tuple(other))[0].is_terminal for other in others
+        ):
             raise FuturesTradeRecommendationExclusivityError(
                 f"{recommendation.contract.product} already has an open recommendation; "
                 f"{recommendation.identity} cannot be recorded beside it."
@@ -547,14 +601,157 @@ class SQLiteFuturesTradeRecommendationStore(FuturesTradeRecommendationStore):
         batch_products.add(product)
 
 
+class SQLiteFuturesTradeRecommendationLifecycleStore(FuturesTradeRecommendationLifecycleStore):
+    """Record futures trade recommendation lifecycle progress as insert-only steps.
+
+    The steps' candles must be in ``futures_ohlcv`` of this same database.
+    """
+
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = str(database_path)
+
+    def record_progress(
+        self,
+        previous: FuturesTradeRecommendationLifecycle,
+        current: FuturesTradeRecommendationLifecycle,
+        *,
+        steps: tuple[FuturesTradeRecommendationLifecycleStep, ...],
+    ) -> int:
+        """Verify and append ``steps`` in one transaction; return the count added."""
+        validate_futures_trade_recommendation_lifecycle_progress(previous, current, steps)
+        recommendation = previous.recommendation
+        for step in steps:
+            if isinstance(step, FuturesTradeRecommendationObservationStep):
+                try:
+                    candle_fingerprint(recommendation, step)
+                except (TypeError, ValueError) as exc:
+                    raise InvalidFuturesTradeRecommendationLifecycleProgressError(
+                        f"Observation at {step.bar.point_in_time} has no fdc1 candle identity: "
+                        f"{exc}"
+                    ) from exc
+
+        connection = _connect(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            recorded = self._record(connection, previous, current, steps)
+            connection.commit()
+        except (
+            FuturesTradeRecommendationLifecycleConflictError,
+            FuturesTradeRecommendationLifecycleEvidenceError,
+            FuturesTradeRecommendationStorageError,
+        ):
+            connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise FuturesTradeRecommendationStorageError(
+                "Futures trade recommendation storage is unavailable."
+            ) from exc
+        finally:
+            connection.close()
+        return recorded
+
+    @classmethod
+    def _record(
+        cls,
+        connection: sqlite3.Connection,
+        previous: FuturesTradeRecommendationLifecycle,
+        current: FuturesTradeRecommendationLifecycle,
+        steps: tuple[FuturesTradeRecommendationLifecycleStep, ...],
+    ) -> int:
+        recommendation = previous.recommendation
+        row = connection.execute(
+            _SELECT_BY_IDENTITY, (recommendation.identity.identity,)
+        ).fetchone()
+        if row is None:
+            raise FuturesTradeRecommendationLifecycleConflictError(
+                f"Recommendation {recommendation.identity} is not recorded."
+            )
+        stored, stored_steps = _lifecycle(connection, tuple(row))
+        if stored.recommendation != recommendation:
+            raise FuturesTradeRecommendationLifecycleConflictError(
+                f"Recommendation {recommendation.identity} is recorded with a different definition."
+            )
+
+        if stored == previous:
+            rows = cls._rows(connection, recommendation, len(stored_steps), previous, steps)
+            for step_values in rows:
+                connection.execute(_INSERT_STEP, step_values)
+            return len(rows)
+
+        # Identical steps applied to two different lifecycles can reach one state,
+        # so an already-recorded request must also have started from ``previous``.
+        start = len(stored_steps) - len(steps)
+        if (
+            stored == current
+            and start >= 0
+            and stored_steps[start:] == steps
+            and cls._replay(recommendation, stored_steps[:start]) == previous
+        ):
+            return 0
+        raise FuturesTradeRecommendationLifecycleConflictError(
+            f"Recommendation {recommendation.identity} is recorded at {stored.status} after "
+            f"{len(stored_steps)} steps, which the requested progress does not continue."
+        )
+
+    @staticmethod
+    def _rows(
+        connection: sqlite3.Connection,
+        recommendation: FuturesTradeRecommendation,
+        recorded: int,
+        previous: FuturesTradeRecommendationLifecycle,
+        steps: tuple[FuturesTradeRecommendationLifecycleStep, ...],
+    ) -> tuple[StepRow, ...]:
+        """Return the new rows, requiring each step's candle to be the stored one."""
+        rows = []
+        lifecycle = previous
+        for sequence, step in enumerate(steps, start=recorded + 1):
+            if isinstance(step, FuturesTradeRecommendationObservationStep):
+                bar = step.bar
+                try:
+                    stored = load_candle(connection, bar.contract, bar.timeframe, bar.point_in_time)
+                except _DECODE_ERRORS as exc:
+                    raise FuturesTradeRecommendationStorageError(
+                        "Futures market data storage contains invalid data."
+                    ) from exc
+                if stored is None:
+                    raise FuturesTradeRecommendationLifecycleEvidenceError(
+                        f"futures_ohlcv holds no {bar.contract} {bar.timeframe} candle at "
+                        f"{bar.point_in_time}; the observation cannot be recorded."
+                    )
+                stored_step = FuturesTradeRecommendationObservationStep(stored, step.trading_date)
+                if stored != bar or candle_fingerprint(
+                    recommendation, stored_step
+                ) != candle_fingerprint(recommendation, step):
+                    raise FuturesTradeRecommendationLifecycleEvidenceError(
+                        f"The observation at {bar.point_in_time} is not the {bar.contract} "
+                        "candle futures_ohlcv holds."
+                    )
+            after = apply_futures_trade_recommendation_lifecycle_step(lifecycle, step)
+            rows.append(step_row(recommendation, sequence, lifecycle, step, after))
+            lifecycle = after
+        return tuple(rows)
+
+    @staticmethod
+    def _replay(
+        recommendation: FuturesTradeRecommendation,
+        steps: tuple[FuturesTradeRecommendationLifecycleStep, ...],
+    ) -> FuturesTradeRecommendationLifecycle:
+        lifecycle = FuturesTradeRecommendationLifecycle(recommendation)
+        for step in steps:
+            lifecycle = apply_futures_trade_recommendation_lifecycle_step(lifecycle, step)
+        return lifecycle
+
+
 class SQLiteFuturesTradeRecommendationRepository(FuturesTradeRecommendationRepository):
     """Read recorded futures trade recommendations and their lifecycles.
 
-    Lifecycles are rebuilt from definitions alone: each is the initial
-    WAITING_FOR_ENTRY lifecycle, because no lifecycle event is persisted yet.
-    That is a temporary state of this slice (F-5B-2 adds lifecycle steps); it
-    never reflects the clock or the validity window, and a recommendation whose
-    validity has passed is still returned open.
+    Each lifecycle is replayed from its stored steps and their candles, inside
+    one read transaction so that the whole product is read as of one instant.
+    A recommendation with no step is its initial WAITING_FOR_ENTRY lifecycle.
+    Nothing reflects the clock or the validity window: a recommendation whose
+    validity has passed stays open until a terminal step is recorded.
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -569,8 +766,12 @@ class SQLiteFuturesTradeRecommendationRepository(FuturesTradeRecommendationRepos
                 "SQLiteFuturesTradeRecommendationRepository identity must be a "
                 "FuturesTradeRecommendationIdentity."
             )
-        rows = self._rows(_SELECT_BY_IDENTITY, (identity.identity,))
-        return _decode(rows[0]) if rows else None
+        rows = self._read(
+            lambda connection: connection.execute(
+                _SELECT_BY_IDENTITY, (identity.identity,)
+            ).fetchall()
+        )
+        return _decode(tuple(rows[0])) if rows else None
 
     def get_lifecycles(
         self, query: FuturesTradeRecommendationQuery
@@ -582,21 +783,33 @@ class SQLiteFuturesTradeRecommendationRepository(FuturesTradeRecommendationRepos
                 "FuturesTradeRecommendationQuery."
             )
         product = query.product
-        rows = self._rows(
-            _SELECT_BY_PRODUCT, (product.product_code.value, product.exchange_code.value)
-        )
-        recommendations = sorted(
-            (_decode(row) for row in rows), key=lambda item: item.identity.identity
-        )
-        return tuple(FuturesTradeRecommendationLifecycle(item) for item in recommendations)
 
-    def _rows(self, sql: str, parameters: tuple[str, ...]) -> list[tuple[object, ...]]:
+        def lifecycles(
+            connection: sqlite3.Connection,
+        ) -> list[FuturesTradeRecommendationLifecycle]:
+            rows = connection.execute(
+                _SELECT_BY_PRODUCT, (product.product_code.value, product.exchange_code.value)
+            ).fetchall()
+            return [_lifecycle(connection, tuple(row))[0] for row in rows]
+
+        return tuple(
+            sorted(self._read(lifecycles), key=lambda item: item.recommendation.identity.identity)
+        )
+
+    def _read[T](self, work: Callable[[sqlite3.Connection], T]) -> T:
+        """Run ``work`` in one read transaction, so every read sees one database state."""
         try:
             with closing(
-                sqlite3.connect(self._database_path, timeout=_BUSY_TIMEOUT_SECONDS)
+                sqlite3.connect(
+                    self._database_path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None
+                )
             ) as connection:
                 initialize_futures_trade_recommendation_schema(connection)
-                return [tuple(row) for row in connection.execute(sql, parameters).fetchall()]
+                connection.execute("BEGIN")
+                try:
+                    return work(connection)
+                finally:
+                    connection.rollback()
         except sqlite3.Error as exc:
             raise FuturesTradeRecommendationStorageError(
                 "Futures trade recommendation storage is unavailable."

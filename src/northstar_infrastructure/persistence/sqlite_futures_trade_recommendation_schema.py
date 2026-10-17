@@ -1,6 +1,6 @@
-"""Schema for the local futures trade recommendation definition store.
+"""Schema for the local futures trade recommendation store.
 
-Two tables, both insert-only:
+Three tables, all insert-only:
 
 - ``futures_recommendation_configurations`` registers each effective generation
   configuration once: an Application profile version, the F-4 policy version
@@ -10,12 +10,33 @@ Two tables, both insert-only:
   policy version is not the one its profile was registered with.
 - ``futures_trade_recommendations`` holds each immutable F-2 recommendation
   definition: its identity, the identity inputs as constrained columns, its
-  issuance instant and the versioned canonical JSON definition.
+  issuance instant and the versioned canonical JSON definition. It has no
+  status, cursor or terminality column and is never updated.
+- ``futures_trade_recommendation_steps`` holds one row per F-2 lifecycle
+  evaluation of a recommendation, numbered contiguously from 1:
 
-There is no lifecycle, step, cursor or audit table here, and no terminality
-flag: whether a recommendation is open is derived from its F-2 lifecycle, which
-F-5B-2 will persist as insert-only steps. Until then every stored definition is
-open.
+  - an OBSERVATION step names the evaluated candle by its ``futures_ohlcv``
+    natural key, the trading-session label it was matched to and its ``fdc1``
+    fingerprint. It stores no price or volume: the candle stays in
+    ``futures_ohlcv`` and is resolved and re-fingerprinted on every read.
+  - a TIME_EXPIRY step names no candle; its TimeExpiryEvidence is in
+    ``evaluation``.
+
+  ``evaluation`` is versioned canonical JSON of the events the step produced
+  (none for a quiet bar) and any time evidence. ``resulting_status`` and
+  ``is_terminal`` are the F-2 status after the step, recorded for audit and
+  lookup and re-derived from Core on every read; they are never written
+  directly. A recommendation is open while it has no terminal step.
+
+The database itself refuses a step for an unrecorded recommendation, a
+duplicated sequence number, a second evaluation of one candle, a second
+terminal step and a step whose candle columns do not match its kind.
+
+There is deliberately no foreign key to ``futures_ohlcv``: this schema does not
+own that table, and SQLite refuses every insert into a child table whose parent
+table is absent -- a time-expiry step that names no candle included. Instead the
+store requires each candle inside the write transaction and every read requires
+it again. There is no generation-audit table here.
 """
 
 from __future__ import annotations
@@ -70,11 +91,77 @@ CREATE INDEX IF NOT EXISTS futures_trade_recommendations_product
 ON futures_trade_recommendations (product_code, exchange_code)
 """
 
+FUTURES_TRADE_RECOMMENDATION_STEP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS futures_trade_recommendation_steps (
+    recommendation_identity TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (typeof(sequence) = 'integer' AND sequence >= 1),
+    step_kind TEXT NOT NULL CHECK (step_kind IN ('OBSERVATION', 'TIME_EXPIRY')),
+    product_code TEXT,
+    exchange_code TEXT,
+    expiration_date TEXT,
+    timeframe TEXT,
+    point_in_time TEXT,
+    trading_date TEXT,
+    candle_fingerprint TEXT,
+    evaluation TEXT NOT NULL,
+    resulting_status TEXT NOT NULL,
+    is_terminal INTEGER NOT NULL CHECK (typeof(is_terminal) = 'integer' AND is_terminal IN (0, 1)),
+    PRIMARY KEY (recommendation_identity, sequence),
+    FOREIGN KEY (recommendation_identity)
+        REFERENCES futures_trade_recommendations (recommendation_identity),
+    CHECK (
+        (
+            step_kind = 'OBSERVATION'
+            AND product_code IS NOT NULL
+            AND exchange_code IS NOT NULL
+            AND expiration_date IS NOT NULL
+            AND timeframe IS NOT NULL
+            AND point_in_time IS NOT NULL
+            AND trading_date IS NOT NULL
+            AND candle_fingerprint IS NOT NULL
+        )
+        OR (
+            step_kind = 'TIME_EXPIRY'
+            AND product_code IS NULL
+            AND exchange_code IS NULL
+            AND expiration_date IS NULL
+            AND timeframe IS NULL
+            AND point_in_time IS NULL
+            AND trading_date IS NULL
+            AND candle_fingerprint IS NULL
+        )
+    )
+)
+"""
+
+FUTURES_TRADE_RECOMMENDATION_STEP_OBSERVATION_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS futures_trade_recommendation_steps_observation
+ON futures_trade_recommendation_steps (recommendation_identity, point_in_time)
+WHERE step_kind = 'OBSERVATION'
+"""
+
+FUTURES_TRADE_RECOMMENDATION_STEP_TERMINAL_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS futures_trade_recommendation_steps_terminal
+ON futures_trade_recommendation_steps (recommendation_identity)
+WHERE is_terminal = 1
+"""
+
+FUTURES_TRADE_RECOMMENDATION_STEP_CANDLE_INDEX = """
+CREATE INDEX IF NOT EXISTS futures_trade_recommendation_steps_candle
+ON futures_trade_recommendation_steps (
+    product_code, exchange_code, expiration_date, timeframe, point_in_time
+)
+"""
+
 
 def initialize_futures_trade_recommendation_schema(connection: sqlite3.Connection) -> None:
-    """Create the futures trade recommendation definition schema when it is absent."""
+    """Create the futures trade recommendation schema when it is absent."""
     connection.execute(FUTURES_RECOMMENDATION_CONFIGURATION_SCHEMA)
     connection.execute(FUTURES_RECOMMENDATION_CONFIGURATION_POLICY_INDEX)
     connection.execute(FUTURES_TRADE_RECOMMENDATION_SCHEMA)
     connection.execute(FUTURES_TRADE_RECOMMENDATION_PRODUCT_INDEX)
+    connection.execute(FUTURES_TRADE_RECOMMENDATION_STEP_SCHEMA)
+    connection.execute(FUTURES_TRADE_RECOMMENDATION_STEP_OBSERVATION_INDEX)
+    connection.execute(FUTURES_TRADE_RECOMMENDATION_STEP_TERMINAL_INDEX)
+    connection.execute(FUTURES_TRADE_RECOMMENDATION_STEP_CANDLE_INDEX)
     connection.commit()
