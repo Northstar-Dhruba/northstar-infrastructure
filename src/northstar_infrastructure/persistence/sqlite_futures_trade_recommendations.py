@@ -31,6 +31,24 @@ exactly the batch. Then, in ONE ``BEGIN IMMEDIATE`` transaction:
 So an audit claims as recorded exactly the definitions its transaction
 inserted, and no definition is committed without its audit.
 
+Every committed definition is read only with its audit (F-5D-1)
+---------------------------------------------------------------
+Every read that returns or replays a recommendation -- ``get_recommendation``,
+``get_lifecycles``, the lifecycle store's replay and the definition store's
+exclusivity replay -- goes through one private helper that, after the
+definition and configuration-seal checks, requires exactly one RECORDED audit
+reference for it, an audit that passes its own canonical verification,
+reports RECORDED, names the recommendation as recorded, and agrees with the
+definition: contract, strategy, policy version, profile version and issuance
+instant. Anything else -- a definition recorded before audits existed
+included -- raises FuturesTradeRecommendationStorageError. Nothing is
+backfilled, repaired, skipped or deleted.
+
+Inside ``record`` a batch's own definitions exist, unaudited, until the audit
+is inserted at the end of the same transaction. They are never read back: the
+exclusivity replay covers only definitions committed before the transaction,
+and the batch's own ones count as open through the batch-product guard.
+
 Standalone audits
 -----------------
 ``SQLiteFuturesRecommendationGenerationAuditStore.record_audit(audit)`` records
@@ -100,6 +118,7 @@ from typing import Any
 
 from northstar_application.application_services import (
     FuturesRecommendationGenerationAudit,
+    FuturesRecommendationGenerationAuditOutcome,
     FuturesTradeRecommendationGenerationProfile,
     FuturesTradeRecommendationIdentityService,
 )
@@ -201,6 +220,10 @@ _SELECT_DEFINITION = (
     "WHERE recommendation_identity = ?"
 )
 _SELECT_OTHERS_ON_PRODUCT = f"{_SELECT_BY_PRODUCT} AND r.recommendation_identity <> ?"
+_SELECT_RECORDED_AUDIT = (
+    "SELECT audit_identity FROM futures_recommendation_generation_audit_recommendations "
+    "WHERE recommendation_identity = ? AND role = 'RECORDED'"
+)
 _SELECT_PROFILE = (
     f"SELECT {', '.join(_CONFIGURATION_COLUMNS)} "  # noqa: S608
     "FROM futures_recommendation_configurations WHERE profile_version = ?"
@@ -512,13 +535,51 @@ def _lifecycle(
     FuturesTradeRecommendationLifecycle, tuple[FuturesTradeRecommendationLifecycleStep, ...]
 ]:
     """Rebuild a stored recommendation's lifecycle; require every stored fact to agree."""
-    recommendation = _decode(row)
+    recommendation = _trusted(connection, row)
     try:
         return reconstruct_lifecycle(connection, recommendation)
     except _DECODE_ERRORS as exc:
         raise FuturesTradeRecommendationStorageError(
             f"Recommendation {recommendation.identity} has invalid lifecycle evidence: {exc}"
         ) from exc
+
+
+def _trusted(connection: sqlite3.Connection, row: tuple[object, ...]) -> FuturesTradeRecommendation:
+    """Return a committed recommendation only with the RECORDED audit that recorded it."""
+    recommendation = _decode(row)
+    identity = recommendation.identity
+    references = connection.execute(_SELECT_RECORDED_AUDIT, (identity.identity,)).fetchall()
+    if len(references) != 1:
+        raise FuturesTradeRecommendationStorageError(
+            f"Recommendation {identity} has {len(references)} RECORDED generation audits; "
+            "exactly one must have recorded it."
+        )
+    audit_identity = references[0][0]
+    if not isinstance(audit_identity, str):
+        raise FuturesTradeRecommendationStorageError(
+            f"Recommendation {identity} references an invalid generation audit."
+        )
+    audit = _stored_audit(connection, audit_identity)
+    if audit is None:
+        raise FuturesTradeRecommendationStorageError(
+            f"Recommendation {identity}'s RECORDED generation audit {audit_identity!r} is missing."
+        )
+    profile_version = row[_DEFINITION_COLUMNS.index("profile_version")]
+    if (
+        audit.outcome is not FuturesRecommendationGenerationAuditOutcome.RECORDED
+        or identity not in audit.recorded
+        or audit.contract != recommendation.contract
+        or audit.strategy != recommendation.source.strategy_identity
+        or audit.policy_version != recommendation.policy_version
+        or audit.profile_version != profile_version
+        or audit.attempted_at != recommendation.issued_at
+    ):
+        raise FuturesTradeRecommendationStorageError(
+            f"Recommendation {identity}'s generation audit {audit_identity!r} does not record "
+            "this definition: its outcome, recorded identities, contract, strategy, "
+            "configuration or attempt instant disagree."
+        )
+    return recommendation
 
 
 def _stored_audit(
@@ -680,9 +741,13 @@ class SQLiteFuturesTradeRecommendationStore(FuturesTradeRecommendationStore):
         batch_products: set[tuple[str, str]],
     ) -> None:
         product = (row[1], row[2])
-        others = connection.execute(_SELECT_OTHERS_ON_PRODUCT, (*product, row[0])).fetchall()
+        # The batch's own definitions are open by construction and not yet audited, so
+        # they are never replayed: the batch-product guard is checked first.
         if product in batch_products or any(
-            not _lifecycle(connection, tuple(other))[0].is_terminal for other in others
+            not _lifecycle(connection, tuple(other))[0].is_terminal
+            for other in connection.execute(
+                _SELECT_OTHERS_ON_PRODUCT, (*product, row[0])
+            ).fetchall()
         ):
             raise FuturesTradeRecommendationExclusivityError(
                 f"{recommendation.contract.product} already has an open recommendation; "
@@ -899,13 +964,12 @@ class SQLiteFuturesTradeRecommendationRepository(FuturesTradeRecommendationRepos
                 "SQLiteFuturesTradeRecommendationRepository identity must be a "
                 "FuturesTradeRecommendationIdentity."
             )
-        rows = _read(
-            self._database_path,
-            lambda connection: connection.execute(
-                _SELECT_BY_IDENTITY, (identity.identity,)
-            ).fetchall(),
-        )
-        return _decode(tuple(rows[0])) if rows else None
+
+        def recommendation(connection: sqlite3.Connection) -> FuturesTradeRecommendation | None:
+            row = connection.execute(_SELECT_BY_IDENTITY, (identity.identity,)).fetchone()
+            return None if row is None else _trusted(connection, tuple(row))
+
+        return _read(self._database_path, recommendation)
 
     def get_lifecycles(
         self, query: FuturesTradeRecommendationQuery

@@ -53,6 +53,9 @@ from northstar_infrastructure.persistence import (
     SQLiteFuturesTradeRecommendationRepository,
     SQLiteFuturesTradeRecommendationStore,
 )
+from northstar_infrastructure.persistence import (
+    sqlite_futures_recommendation_generation_audits as audits,
+)
 from tests.futures_recommendation_audit_fixtures import recording_audit
 
 LONG, SHORT = TradeDirection.LONG, TradeDirection.SHORT
@@ -592,13 +595,16 @@ def test_every_expiry_of_the_product_is_returned_and_others_are_not(database: Pa
     october, november = _recommendation(_OCT), _recommendation(_NOV)
     _record(database, october)
     # A second open NIFTY recommendation cannot be recorded until the first is
-    # released (F-5B-2); insert its canonical row directly to prove that the
-    # read spans every expiry of the product.
+    # released (F-5B-2); insert its canonical row and its RECORDED audit directly,
+    # in one transaction, to prove that the read spans every expiry of the product.
     configuration = _rows(database, "futures_recommendation_configurations")[0]
     row = module._definition_row(
         november, _PROFILE.version, module._configuration_digest(configuration)
     )
-    _execute(database, module._INSERT_DEFINITION, row)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(module._INSERT_DEFINITION, row)
+        audits.insert_audit(connection, recording_audit(november, profile=_PROFILE))
+        connection.commit()
     _record(database, _recommendation(_BANK_OCT))
 
     lifecycles = _repository(database).get_lifecycles(FuturesTradeRecommendationQuery(_NIFTY))
