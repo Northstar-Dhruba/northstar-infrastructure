@@ -1,4 +1,4 @@
-"""Tests for the futures trade recommendation schema (F-5B-1B definitions, F-5B-2A steps)."""
+"""Tests for the futures trade recommendation schema (F-5B-1B, F-5B-2A steps, F-5B-2B audits)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import pytest
 
 from northstar_infrastructure.persistence import (
     FUTURES_RECOMMENDATION_CONFIGURATION_SCHEMA,
+    FUTURES_RECOMMENDATION_GENERATION_AUDIT_REFERENCE_SCHEMA,
+    FUTURES_RECOMMENDATION_GENERATION_AUDIT_SCHEMA,
     FUTURES_TRADE_RECOMMENDATION_SCHEMA,
     FUTURES_TRADE_RECOMMENDATION_STEP_SCHEMA,
     initialize_futures_trade_recommendation_schema,
@@ -41,7 +43,7 @@ def _unique_index_columns(connection: sqlite3.Connection, table: str) -> set[tup
     return found
 
 
-def test_exactly_the_definition_and_step_tables_exist(database: Path) -> None:
+def test_exactly_the_definition_step_and_audit_tables_exist(database: Path) -> None:
     with closing(sqlite3.connect(database)) as connection:
         tables = {
             row[0]
@@ -54,8 +56,9 @@ def test_exactly_the_definition_and_step_tables_exist(database: Path) -> None:
         "futures_recommendation_configurations",
         "futures_trade_recommendations",
         "futures_trade_recommendation_steps",
+        "futures_recommendation_generation_audits",
+        "futures_recommendation_generation_audit_recommendations",
     }
-    assert not any("audit" in table for table in tables)
 
 
 def test_the_configuration_table(database: Path) -> None:
@@ -345,4 +348,170 @@ def test_the_step_schema_has_no_audit_or_update_concept() -> None:
     text = FUTURES_TRADE_RECOMMENDATION_STEP_SCHEMA.lower()
 
     for fragment in ("audit", "updated_at", "trigger", "open_value", "close_value"):
+        assert fragment not in text
+
+
+# ---------------------------------------------------------------------------
+# Generation audits (F-5B-2B)
+# ---------------------------------------------------------------------------
+
+_AUDIT_VALUES = (
+    "'NIFTY', 'NSE', '2026-10-27', 's', 'p1', 'v1', '2026-10-07T12:00:00Z', '2026-10-07'"
+)
+
+
+def _insert_audit(
+    connection: sqlite3.Connection,
+    identity: str = "audit-1",
+    status: str = "COMPLETED",
+    block_reason: str | None = None,
+    outcome: str = "RECORDED",
+    version: object = 1,
+) -> None:
+    connection.execute(
+        "INSERT INTO futures_recommendation_generation_audits VALUES "  # noqa: S608
+        f"(?, ?, {_AUDIT_VALUES}, ?, ?, ?, '{{}}')",
+        (identity, version, status, block_reason, outcome),
+    )
+
+
+def test_the_audit_table(database: Path) -> None:
+    with closing(sqlite3.connect(database)) as connection:
+        columns = _columns(connection, "futures_recommendation_generation_audits")
+        foreign = connection.execute(
+            "PRAGMA foreign_key_list(futures_recommendation_generation_audits)"
+        ).fetchall()
+
+    assert columns == [
+        ("audit_identity", "TEXT", 1, 1),
+        ("evidence_version", "INTEGER", 1, 0),
+        ("product_code", "TEXT", 1, 0),
+        ("exchange_code", "TEXT", 1, 0),
+        ("expiration_date", "TEXT", 1, 0),
+        ("strategy_identity", "TEXT", 1, 0),
+        ("policy_version", "TEXT", 1, 0),
+        ("profile_version", "TEXT", 1, 0),
+        ("attempted_at", "TEXT", 1, 0),
+        ("session_date", "TEXT", 0, 0),
+        ("generation_status", "TEXT", 1, 0),
+        ("block_reason", "TEXT", 0, 0),
+        ("outcome", "TEXT", 1, 0),
+        ("audit", "TEXT", 1, 0),
+    ]
+    assert foreign == []  # a blocked attempt's configuration may never be registered
+
+
+def test_the_audit_reference_table_and_indexes(database: Path) -> None:
+    table = "futures_recommendation_generation_audit_recommendations"
+    with closing(sqlite3.connect(database)) as connection:
+        columns = _columns(connection, table)
+        foreign = connection.execute(f"PRAGMA foreign_key_list({table})").fetchall()  # noqa: S608
+        unique = _unique_index_columns(connection, table)
+        recorded = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = "
+            "'futures_recommendation_generation_audit_recorded'"
+        ).fetchone()[0]
+        audit_indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(futures_recommendation_generation_audits)"
+            )
+        }
+
+    assert columns == [
+        ("audit_identity", "TEXT", 1, 1),
+        ("recommendation_identity", "TEXT", 1, 2),
+        ("role", "TEXT", 1, 0),
+    ]
+    assert {(row[2], row[3], row[4]) for row in foreign} == {
+        (
+            "futures_recommendation_generation_audits",
+            "audit_identity",
+            "audit_identity",
+        ),
+        ("futures_trade_recommendations", "recommendation_identity", "recommendation_identity"),
+    }
+    assert ("recommendation_identity",) in unique
+    assert "WHERE role = 'RECORDED'" in recorded
+    assert "futures_recommendation_generation_audits_product" in audit_indexes
+
+
+def test_the_audit_tables_store_no_prices(database: Path) -> None:
+    with closing(sqlite3.connect(database)) as connection:
+        names = {
+            column[0]
+            for table in (
+                "futures_recommendation_generation_audits",
+                "futures_recommendation_generation_audit_recommendations",
+            )
+            for column in _columns(connection, table)
+        }
+
+    for fragment in ("open", "high", "low", "close", "volume", "price", "payload", "provider"):
+        assert not any(fragment in name for name in names), fragment
+
+
+@pytest.mark.parametrize(
+    "status, block_reason, outcome, version",
+    [
+        ("COMPLETED", "NO_RESEARCH_FOR_SESSION", "REJECTED", 1),
+        ("BLOCKED", None, "BLOCKED", 1),
+        ("BLOCKED", "NO_RESEARCH_FOR_SESSION", "REJECTED", 1),
+        ("COMPLETED", None, "BLOCKED", 1),
+        ("OTHER", None, "REJECTED", 1),
+        ("COMPLETED", None, "PUBLISHED", 1),
+        ("COMPLETED", None, "RECORDED", 0),
+        ("COMPLETED", None, "RECORDED", "one"),
+    ],
+    ids=[
+        "completed-with-reason",
+        "blocked-without-reason",
+        "blocked-not-blocked-outcome",
+        "blocked-outcome-not-blocked",
+        "unknown-status",
+        "unknown-outcome",
+        "version-zero",
+        "version-text",
+    ],
+)
+def test_the_database_refuses_a_malformed_audit(
+    database: Path, status: str, block_reason: str | None, outcome: str, version: object
+) -> None:
+    with closing(sqlite3.connect(database)) as connection, pytest.raises(sqlite3.IntegrityError):
+        _insert_audit(connection, "x", status, block_reason, outcome, version)
+
+
+def test_the_database_refuses_an_audit_naming_an_unrecorded_recommendation(
+    database: Path,
+) -> None:
+    with closing(_with_definition(database)) as connection:
+        _insert_audit(connection)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO futures_recommendation_generation_audit_recommendations "
+                "VALUES ('audit-1', 'unrecorded', 'RECORDED')"
+            )
+
+
+def test_the_database_allows_one_recorded_audit_per_recommendation(database: Path) -> None:
+    sql = "INSERT INTO futures_recommendation_generation_audit_recommendations VALUES (?, 'a', ?)"
+    with closing(_with_definition(database)) as connection:
+        _insert_audit(connection, "audit-1")
+        _insert_audit(connection, "audit-2", outcome="EXISTING_RETURNED")
+        _insert_audit(connection, "audit-3")
+        connection.execute(sql, ("audit-1", "RECORDED"))
+        connection.execute(sql, ("audit-2", "EXISTING"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(sql, ("audit-3", "RECORDED"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(sql, ("audit-2", "PROPOSED"))
+
+
+def test_the_audit_schema_has_no_update_or_publication_concept() -> None:
+    text = (
+        FUTURES_RECOMMENDATION_GENERATION_AUDIT_SCHEMA
+        + FUTURES_RECOMMENDATION_GENERATION_AUDIT_REFERENCE_SCHEMA
+    ).lower()
+
+    for fragment in ("updated_at", "trigger", "publish", "deliver", "notif", "execut"):
         assert fragment not in text

@@ -1,28 +1,45 @@
-"""SQLite-backed futures trade recommendation store, lifecycle store and repository.
+"""SQLite-backed futures trade recommendation stores, audit stores and repositories.
 
 Status: an internal persistence capability, not an enabled recording workflow.
-A successful generation must eventually commit its recommendation and its
-generation audit in one transaction (F-5B-2B); this module stores definitions,
-configurations and lifecycle steps, and nothing wires it into operations.
+Nothing here is wired into operations.
 
-Recording
----------
-``record(recommendations, policy=..., profile=...)`` first runs the shared
-Application validator, which re-derives every identity from its source under
-the profile. Then, in ONE ``BEGIN IMMEDIATE`` transaction:
+Recording, with its generation audit (I-2)
+------------------------------------------
+``record(recommendations, policy=..., profile=..., audit=...)`` first runs the
+shared Application validator, which re-derives every identity from its source
+under the profile and requires ``audit`` to be the RECORDED audit naming
+exactly the batch. Then, in ONE ``BEGIN IMMEDIATE`` transaction:
 
 1. the configuration is registered, first write wins. A profile version already
    registered with other contents, or a policy version registered with other
    parameters under any profile, raises the configuration conflict;
-2. for each recommendation: an identity already stored with the identical
-   definition is an idempotent no-op; with a different definition it is a
-   FuturesTradeRecommendationConflictError and nothing is overwritten;
+2. if the batch's identities are already stored: when every definition is
+   identical and the same audit is already stored with equal content, this is
+   the same committed recording replayed -- an idempotent no-op. Otherwise
+   it is a FuturesTradeRecommendationConflictError and nothing is written:
+   another recording owns those identities, and this audit must not claim them;
 3. a new recommendation is refused with FuturesTradeRecommendationExclusivityError
    when its product -- product code and exchange, every expiry -- already has
    another open recommendation, or an earlier one in the same batch. "Open" is
    the F-2 status of the other recommendation's lifecycle, replayed from its
    stored steps inside this transaction;
-4. new definitions are inserted, and the whole batch commits or rolls back.
+4. the definitions are inserted; then the audit, whose identity must not be
+   stored already (FuturesRecommendationGenerationAuditConflictError), with a
+   RECORDED reference to each definition just inserted;
+5. everything commits, or everything rolls back.
+
+So an audit claims as recorded exactly the definitions its transaction
+inserted, and no definition is committed without its audit.
+
+Standalone audits
+-----------------
+``SQLiteFuturesRecommendationGenerationAuditStore.record_audit(audit)`` records
+an EXISTING_RETURNED, REJECTED or BLOCKED audit in its own transaction, without
+registering a configuration: an equal audit already stored is a no-op, a
+different one under the same identity is an audit conflict, and every identity
+named as existing must be recorded for the audited attempt. A RECORDED audit is
+refused there. Audits are encoded and verified by
+sqlite_futures_recommendation_generation_audits.
 
 ``BEGIN IMMEDIATE`` takes the database's write lock before anything is read, so
 concurrent writers are serialised by SQLite itself, whatever lock the caller
@@ -82,10 +99,14 @@ from pathlib import Path
 from typing import Any
 
 from northstar_application.application_services import (
+    FuturesRecommendationGenerationAudit,
     FuturesTradeRecommendationGenerationProfile,
     FuturesTradeRecommendationIdentityService,
 )
 from northstar_application.ports import (
+    FuturesRecommendationGenerationAuditConflictError,
+    FuturesRecommendationGenerationAuditRepository,
+    FuturesRecommendationGenerationAuditStore,
     FuturesTradeRecommendationConfigurationConflictError,
     FuturesTradeRecommendationConflictError,
     FuturesTradeRecommendationExclusivityError,
@@ -102,6 +123,7 @@ from northstar_application.ports import (
     apply_futures_trade_recommendation_lifecycle_step,
     validate_futures_trade_recommendation_lifecycle_progress,
     validate_futures_trade_recommendation_recording,
+    validate_standalone_futures_recommendation_generation_audit,
 )
 from northstar_core.derivatives import ExpirationDate, QuoteValue
 from northstar_core.foundation.value_objects import (
@@ -126,6 +148,11 @@ from northstar_core.recommendations.futures import (
 )
 from northstar_core.strategy import ExplanationReason, StrategyIdentity
 
+from northstar_infrastructure.persistence.sqlite_futures_recommendation_generation_audits import (  # noqa: E501
+    insert_audit,
+    require_existing_references,
+    stored_audit,
+)
 from northstar_infrastructure.persistence.sqlite_futures_trade_recommendation_schema import (
     initialize_futures_trade_recommendation_schema,
 )
@@ -494,6 +521,58 @@ def _lifecycle(
         ) from exc
 
 
+def _stored_audit(
+    connection: sqlite3.Connection, identity: str
+) -> FuturesRecommendationGenerationAudit | None:
+    """Return the stored audit, requiring every stored fact to agree."""
+    try:
+        return stored_audit(connection, identity)
+    except _DECODE_ERRORS as exc:
+        raise FuturesTradeRecommendationStorageError(
+            f"Generation audit {identity!r} has invalid evidence: {exc}"
+        ) from exc
+
+
+def _write[T](database_path: str, work: Callable[[sqlite3.Connection], T]) -> T:
+    """Run ``work`` in one BEGIN IMMEDIATE transaction; commit it, or roll all of it back."""
+    connection = _connect(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        outcome = work(connection)
+        connection.commit()
+        return outcome
+    except sqlite3.Error as exc:
+        if connection.in_transaction:
+            connection.rollback()
+        raise FuturesTradeRecommendationStorageError(
+            "Futures trade recommendation storage is unavailable."
+        ) from exc
+    except BaseException:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _read[T](database_path: str, work: Callable[[sqlite3.Connection], T]) -> T:
+    """Run ``work`` in one read transaction, so every read sees one database state."""
+    try:
+        with closing(
+            sqlite3.connect(database_path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None)
+        ) as connection:
+            initialize_futures_trade_recommendation_schema(connection)
+            connection.execute("BEGIN")
+            try:
+                return work(connection)
+            finally:
+                connection.rollback()
+    except sqlite3.Error as exc:
+        raise FuturesTradeRecommendationStorageError(
+            "Futures trade recommendation storage is unavailable."
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Adapters
 # ---------------------------------------------------------------------------
@@ -511,10 +590,11 @@ class SQLiteFuturesTradeRecommendationStore(FuturesTradeRecommendationStore):
         *,
         policy: FuturesRecommendationGenerationPolicy,
         profile: FuturesTradeRecommendationGenerationProfile,
+        audit: FuturesRecommendationGenerationAudit,
     ) -> int:
-        """Register the configuration and record the batch in one transaction."""
+        """Register the configuration and record the batch and its audit in one transaction."""
         validate_futures_trade_recommendation_recording(
-            recommendations, policy=policy, profile=profile
+            recommendations, policy=policy, profile=profile, audit=audit
         )
         identities = [recommendation.identity for recommendation in recommendations]
         if len(set(identities)) != len(identities):
@@ -528,31 +608,50 @@ class SQLiteFuturesTradeRecommendationStore(FuturesTradeRecommendationStore):
             for recommendation in recommendations
         )
 
-        connection = _connect(self._database_path)
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        def work(connection: sqlite3.Connection) -> int:
             self._register(connection, configuration)
+            if self._already_recorded(connection, rows, audit):
+                return len(recommendations)
             batch_products: set[tuple[str, str]] = set()
             for recommendation, row in rows:
                 self._record_one(connection, recommendation, row, batch_products)
-            connection.commit()
-        except (
-            FuturesTradeRecommendationConflictError,
-            FuturesTradeRecommendationConfigurationConflictError,
-            FuturesTradeRecommendationExclusivityError,
-            FuturesTradeRecommendationStorageError,
+            if _stored_audit(connection, audit.identity) is not None:
+                raise FuturesRecommendationGenerationAuditConflictError(
+                    f"Generation audit {audit.identity} is already recorded with other content."
+                )
+            require_existing_references(connection, audit)
+            insert_audit(connection, audit)
+            return len(recommendations)
+
+        return _write(self._database_path, work)
+
+    @staticmethod
+    def _already_recorded(
+        connection: sqlite3.Connection,
+        rows: tuple[tuple[FuturesTradeRecommendation, _DefinitionRow], ...],
+        audit: FuturesRecommendationGenerationAudit,
+    ) -> bool:
+        """Return whether this exact recording is committed; refuse identities owned elsewhere."""
+        stored = [connection.execute(_SELECT_DEFINITION, (row[0],)).fetchone() for _, row in rows]
+        if all(definition is None for definition in stored):
+            return False
+        if (
+            all(
+                definition is not None and tuple(definition) == row
+                for definition, (_, row) in zip(stored, rows, strict=True)
+            )
+            and _stored_audit(connection, audit.identity) == audit
         ):
-            connection.rollback()
-            raise
-        except sqlite3.Error as exc:
-            if connection.in_transaction:
-                connection.rollback()
-            raise FuturesTradeRecommendationStorageError(
-                "Futures trade recommendation storage is unavailable."
-            ) from exc
-        finally:
-            connection.close()
-        return len(recommendations)
+            return True
+        recorded = next(
+            recommendation
+            for definition, (recommendation, _) in zip(stored, rows, strict=True)
+            if definition is not None
+        )
+        raise FuturesTradeRecommendationConflictError(
+            f"Recommendation {recorded.identity} is already recorded by another recording; "
+            "this attempt cannot record it or claim it in its audit."
+        )
 
     @staticmethod
     def _register(connection: sqlite3.Connection, configuration: _ConfigurationRow) -> None:
@@ -580,14 +679,6 @@ class SQLiteFuturesTradeRecommendationStore(FuturesTradeRecommendationStore):
         row: _DefinitionRow,
         batch_products: set[tuple[str, str]],
     ) -> None:
-        stored = connection.execute(_SELECT_DEFINITION, (row[0],)).fetchone()
-        if stored is not None:
-            if tuple(stored) != row:
-                raise FuturesTradeRecommendationConflictError(
-                    f"Recommendation {recommendation.identity} is already recorded with a "
-                    "different definition."
-                )
-            return
         product = (row[1], row[2])
         others = connection.execute(_SELECT_OTHERS_ON_PRODUCT, (*product, row[0])).fetchall()
         if product in batch_products or any(
@@ -744,6 +835,48 @@ class SQLiteFuturesTradeRecommendationLifecycleStore(FuturesTradeRecommendationL
         return lifecycle
 
 
+class SQLiteFuturesRecommendationGenerationAuditStore(FuturesRecommendationGenerationAuditStore):
+    """Record audits of generation attempts that recorded no new recommendation."""
+
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = str(database_path)
+
+    def record_audit(self, audit: FuturesRecommendationGenerationAudit) -> int:
+        """Insert a standalone audit in its own transaction; 0 when already recorded."""
+        validate_standalone_futures_recommendation_generation_audit(audit)
+
+        def work(connection: sqlite3.Connection) -> int:
+            stored = _stored_audit(connection, audit.identity)
+            if stored is not None:
+                if stored != audit:
+                    raise FuturesRecommendationGenerationAuditConflictError(
+                        f"Generation audit {audit.identity} is already recorded with other content."
+                    )
+                return 0
+            require_existing_references(connection, audit)
+            insert_audit(connection, audit)
+            return 1
+
+        return _write(self._database_path, work)
+
+
+class SQLiteFuturesRecommendationGenerationAuditRepository(
+    FuturesRecommendationGenerationAuditRepository
+):
+    """Read recorded generation audits, verified against their stored evidence."""
+
+    def __init__(self, database_path: str | Path) -> None:
+        self._database_path = str(database_path)
+
+    def get_audit(self, identity: str) -> FuturesRecommendationGenerationAudit | None:
+        """Return the audit recorded under ``identity``, if any."""
+        if not isinstance(identity, str):
+            raise TypeError(
+                "SQLiteFuturesRecommendationGenerationAuditRepository identity must be text."
+            )
+        return _read(self._database_path, lambda connection: _stored_audit(connection, identity))
+
+
 class SQLiteFuturesTradeRecommendationRepository(FuturesTradeRecommendationRepository):
     """Read recorded futures trade recommendations and their lifecycles.
 
@@ -766,10 +899,11 @@ class SQLiteFuturesTradeRecommendationRepository(FuturesTradeRecommendationRepos
                 "SQLiteFuturesTradeRecommendationRepository identity must be a "
                 "FuturesTradeRecommendationIdentity."
             )
-        rows = self._read(
+        rows = _read(
+            self._database_path,
             lambda connection: connection.execute(
                 _SELECT_BY_IDENTITY, (identity.identity,)
-            ).fetchall()
+            ).fetchall(),
         )
         return _decode(tuple(rows[0])) if rows else None
 
@@ -793,24 +927,8 @@ class SQLiteFuturesTradeRecommendationRepository(FuturesTradeRecommendationRepos
             return [_lifecycle(connection, tuple(row))[0] for row in rows]
 
         return tuple(
-            sorted(self._read(lifecycles), key=lambda item: item.recommendation.identity.identity)
+            sorted(
+                _read(self._database_path, lifecycles),
+                key=lambda item: item.recommendation.identity.identity,
+            )
         )
-
-    def _read[T](self, work: Callable[[sqlite3.Connection], T]) -> T:
-        """Run ``work`` in one read transaction, so every read sees one database state."""
-        try:
-            with closing(
-                sqlite3.connect(
-                    self._database_path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level=None
-                )
-            ) as connection:
-                initialize_futures_trade_recommendation_schema(connection)
-                connection.execute("BEGIN")
-                try:
-                    return work(connection)
-                finally:
-                    connection.rollback()
-        except sqlite3.Error as exc:
-            raise FuturesTradeRecommendationStorageError(
-                "Futures trade recommendation storage is unavailable."
-            ) from exc

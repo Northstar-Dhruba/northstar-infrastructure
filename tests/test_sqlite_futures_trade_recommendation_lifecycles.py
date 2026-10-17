@@ -72,6 +72,7 @@ from northstar_infrastructure.persistence import (
     SQLiteFuturesTradeRecommendationRepository,
     SQLiteFuturesTradeRecommendationStore,
 )
+from tests.futures_recommendation_audit_fixtures import recording_audit
 
 Observation = FuturesTradeRecommendationObservationStep
 Expiry = FuturesTradeRecommendationTimeExpiryStep
@@ -200,7 +201,10 @@ def _lifecycle_store(database: Path) -> SQLiteFuturesTradeRecommendationLifecycl
 
 def _record(database: Path, *recommendations: FuturesTradeRecommendation) -> int:
     return SQLiteFuturesTradeRecommendationStore(database).record(
-        recommendations, policy=_POLICY, profile=_PROFILE
+        recommendations,
+        policy=_POLICY,
+        profile=_PROFILE,
+        audit=recording_audit(*recommendations, profile=_PROFILE),
     )
 
 

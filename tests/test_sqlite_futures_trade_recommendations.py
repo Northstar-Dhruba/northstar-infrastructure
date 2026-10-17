@@ -53,6 +53,7 @@ from northstar_infrastructure.persistence import (
     SQLiteFuturesTradeRecommendationRepository,
     SQLiteFuturesTradeRecommendationStore,
 )
+from tests.futures_recommendation_audit_fixtures import recording_audit
 
 LONG, SHORT = TradeDirection.LONG, TradeDirection.SHORT
 
@@ -147,7 +148,12 @@ def _repository(database: Path) -> SQLiteFuturesTradeRecommendationRepository:
 
 
 def _record(database: Path, *recommendations, policy=_POLICY, profile=_PROFILE) -> int:
-    return _store(database).record(tuple(recommendations), policy=policy, profile=profile)
+    return _store(database).record(
+        tuple(recommendations),
+        policy=policy,
+        profile=profile,
+        audit=recording_audit(*recommendations, profile=profile),
+    )
 
 
 def _rows(database: Path, table: str) -> list[tuple]:
@@ -203,16 +209,16 @@ def test_every_material_policy_field_is_registered() -> None:
 
 def test_an_identical_configuration_registers_once(database: Path) -> None:
     _record(database, _recommendation())
-    _record(database, policy=_POLICY, profile=_PROFILE)
+    _record(database, _recommendation(_BANK_OCT))
 
     assert len(_rows(database, "futures_recommendation_configurations")) == 1
 
 
 def test_equal_decimals_are_one_configuration(database: Path) -> None:
-    _record(database, policy=_POLICY, profile=_PROFILE)
+    _record(database, _recommendation())
     same = _policy(entry_multiplier=Decimal("0.250"), target_multiplier=Decimal("3.00"))
 
-    _record(database, policy=same, profile=_PROFILE)
+    _record(database, _recommendation(_BANK_OCT), policy=same, profile=_PROFILE)
 
     assert len(_rows(database, "futures_recommendation_configurations")) == 1
 
@@ -220,27 +226,32 @@ def test_equal_decimals_are_one_configuration(database: Path) -> None:
 def test_a_profile_version_reused_with_another_horizon_is_a_configuration_conflict(
     database: Path,
 ) -> None:
-    _record(database, policy=_POLICY, profile=_PROFILE)
+    _record(database, _recommendation())
     reused = FuturesTradeRecommendationGenerationProfile(_PROFILE.version, 7, _POLICY.version)
 
     with pytest.raises(FuturesTradeRecommendationConfigurationConflictError):
-        _record(database, policy=_POLICY, profile=reused)
+        _record(database, _recommendation(_BANK_OCT, profile=reused), profile=reused)
 
 
 def test_a_policy_version_reused_with_other_parameters_conflicts_even_under_a_new_profile(
     database: Path,
 ) -> None:
-    _record(database, policy=_POLICY, profile=_PROFILE)
+    _record(database, _recommendation())
     changed = _policy(min_reward_to_risk=Decimal("1.6"))
 
     with pytest.raises(FuturesTradeRecommendationConfigurationConflictError):
-        _record(database, policy=changed, profile=_PROFILE_V2)
+        _record(
+            database,
+            _recommendation(_BANK_OCT, profile=_PROFILE_V2),
+            policy=changed,
+            profile=_PROFILE_V2,
+        )
     assert len(_rows(database, "futures_recommendation_configurations")) == 1
 
 
 def test_two_profiles_may_share_one_policy(database: Path) -> None:
-    _record(database, policy=_POLICY, profile=_PROFILE)
-    _record(database, policy=_POLICY, profile=_PROFILE_V2)
+    _record(database, _recommendation())
+    _record(database, _recommendation(_BANK_OCT, profile=_PROFILE_V2), profile=_PROFILE_V2)
 
     assert [row[0] for row in _rows(database, "futures_recommendation_configurations")] == [
         "f5a-synthetic-profile-v1",
@@ -343,16 +354,18 @@ def test_a_batch_naming_one_identity_twice_is_refused(database: Path) -> None:
     recommendation = _recommendation()
 
     with pytest.raises(InvalidFuturesTradeRecommendationRecordingError):
-        _record(database, recommendation, recommendation)
+        _store(database).record(
+            (recommendation, recommendation),
+            policy=_POLICY,
+            profile=_PROFILE,
+            audit=recording_audit(recommendation, profile=_PROFILE),
+        )
 
 
 def test_different_products_are_recorded_independently(database: Path) -> None:
-    _record(
-        database,
-        _recommendation(_OCT),
-        _recommendation(_BANK_OCT, SHORT),
-        _recommendation(_SGX_OCT),
-    )
+    _record(database, _recommendation(_OCT))
+    _record(database, _recommendation(_BANK_OCT, SHORT))
+    _record(database, _recommendation(_SGX_OCT))
 
     assert len(_rows(database, "futures_trade_recommendations")) == 3
 
@@ -406,8 +419,10 @@ def test_a_new_policy_version_cannot_bypass_exclusivity(database: Path) -> None:
 
 
 def test_one_batch_cannot_hold_two_recommendations_for_one_product(database: Path) -> None:
+    sibling = _recommendation(_OCT, decided="2026-10-06T10:00:00Z")
+
     with pytest.raises(FuturesTradeRecommendationExclusivityError):
-        _record(database, _recommendation(_OCT), _recommendation(_NOV))
+        _record(database, _recommendation(_OCT), sibling)
 
     assert _rows(database, "futures_trade_recommendations") == []
     assert _rows(database, "futures_recommendation_configurations") == []
@@ -448,7 +463,8 @@ def _race(database: Path, attempts: list) -> list[object]:
 
 
 def _initialised(database: Path) -> Path:
-    _record(database, policy=_POLICY, profile=_PROFILE)
+    with closing(sqlite3.connect(database)) as connection:
+        module.initialize_futures_trade_recommendation_schema(connection)
     return database
 
 
@@ -511,8 +527,8 @@ def test_concurrent_configuration_collision_registers_only_one(database: Path) -
     outcomes = _race(
         database,
         [
-            lambda: _record(database, policy=_POLICY, profile=_PROFILE),
-            lambda: _record(database, policy=_POLICY, profile=reused),
+            lambda: _record(database, _recommendation(_OCT)),
+            lambda: _record(database, _recommendation(_BANK_OCT, profile=reused), profile=reused),
         ],
     )
 
