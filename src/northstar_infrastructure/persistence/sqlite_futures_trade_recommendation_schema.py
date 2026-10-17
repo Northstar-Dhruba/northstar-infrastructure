@@ -1,6 +1,6 @@
 """Schema for the local futures trade recommendation store.
 
-Three tables, all insert-only:
+Five tables, all insert-only:
 
 - ``futures_recommendation_configurations`` registers each effective generation
   configuration once: an Application profile version, the F-4 policy version
@@ -28,6 +28,23 @@ Three tables, all insert-only:
   lookup and re-derived from Core on every read; they are never written
   directly. A recommendation is open while it has no terminal step.
 
+- ``futures_recommendation_generation_audits`` holds one row per audited
+  generation attempt: its identity, the attempt's contract, strategy,
+  configuration versions, attempt instant and session label as constrained
+  columns, its generation status, block reason and outcome, and the versioned
+  canonical JSON of the whole FuturesRecommendationGenerationAudit. It has no
+  foreign key to the configuration registry: a blocked attempt's configuration
+  may never have been registered, and its audit registers none.
+- ``futures_recommendation_generation_audit_recommendations`` lists the
+  recommendation identities an audit names as RECORDED or EXISTING, each with
+  a foreign key to its definition, so the database refuses an audit that names
+  an unrecorded recommendation. A partial unique index allows at most one
+  RECORDED audit per recommendation. Proposed identities are not listed: a
+  lost race proposes an identity this attempt never recorded.
+
+A RECORDED audit is inserted in the same transaction as the definitions it
+names (I-2); nothing here can express that, so the store enforces it.
+
 The database itself refuses a step for an unrecorded recommendation, a
 duplicated sequence number, a second evaluation of one candle, a second
 terminal step and a step whose candle columns do not match its kind.
@@ -36,7 +53,7 @@ There is deliberately no foreign key to ``futures_ohlcv``: this schema does not
 own that table, and SQLite refuses every insert into a child table whose parent
 table is absent -- a time-expiry step that names no candle included. Instead the
 store requires each candle inside the write transaction and every read requires
-it again. There is no generation-audit table here.
+it again.
 """
 
 from __future__ import annotations
@@ -154,6 +171,54 @@ ON futures_trade_recommendation_steps (
 """
 
 
+FUTURES_RECOMMENDATION_GENERATION_AUDIT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS futures_recommendation_generation_audits (
+    audit_identity TEXT NOT NULL PRIMARY KEY,
+    evidence_version INTEGER NOT NULL
+        CHECK (typeof(evidence_version) = 'integer' AND evidence_version >= 1),
+    product_code TEXT NOT NULL,
+    exchange_code TEXT NOT NULL,
+    expiration_date TEXT NOT NULL,
+    strategy_identity TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    profile_version TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    session_date TEXT,
+    generation_status TEXT NOT NULL CHECK (generation_status IN ('COMPLETED', 'BLOCKED')),
+    block_reason TEXT,
+    outcome TEXT NOT NULL
+        CHECK (outcome IN ('RECORDED', 'EXISTING_RETURNED', 'REJECTED', 'BLOCKED')),
+    audit TEXT NOT NULL,
+    CHECK ((generation_status = 'BLOCKED') = (block_reason IS NOT NULL)),
+    CHECK ((generation_status = 'BLOCKED') = (outcome = 'BLOCKED'))
+)
+"""
+
+FUTURES_RECOMMENDATION_GENERATION_AUDIT_PRODUCT_INDEX = """
+CREATE INDEX IF NOT EXISTS futures_recommendation_generation_audits_product
+ON futures_recommendation_generation_audits (product_code, exchange_code)
+"""
+
+FUTURES_RECOMMENDATION_GENERATION_AUDIT_REFERENCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS futures_recommendation_generation_audit_recommendations (
+    audit_identity TEXT NOT NULL,
+    recommendation_identity TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('RECORDED', 'EXISTING')),
+    PRIMARY KEY (audit_identity, recommendation_identity),
+    FOREIGN KEY (audit_identity)
+        REFERENCES futures_recommendation_generation_audits (audit_identity),
+    FOREIGN KEY (recommendation_identity)
+        REFERENCES futures_trade_recommendations (recommendation_identity)
+)
+"""
+
+FUTURES_RECOMMENDATION_GENERATION_AUDIT_RECORDED_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS futures_recommendation_generation_audit_recorded
+ON futures_recommendation_generation_audit_recommendations (recommendation_identity)
+WHERE role = 'RECORDED'
+"""
+
+
 def initialize_futures_trade_recommendation_schema(connection: sqlite3.Connection) -> None:
     """Create the futures trade recommendation schema when it is absent."""
     connection.execute(FUTURES_RECOMMENDATION_CONFIGURATION_SCHEMA)
@@ -164,4 +229,8 @@ def initialize_futures_trade_recommendation_schema(connection: sqlite3.Connectio
     connection.execute(FUTURES_TRADE_RECOMMENDATION_STEP_OBSERVATION_INDEX)
     connection.execute(FUTURES_TRADE_RECOMMENDATION_STEP_TERMINAL_INDEX)
     connection.execute(FUTURES_TRADE_RECOMMENDATION_STEP_CANDLE_INDEX)
+    connection.execute(FUTURES_RECOMMENDATION_GENERATION_AUDIT_SCHEMA)
+    connection.execute(FUTURES_RECOMMENDATION_GENERATION_AUDIT_PRODUCT_INDEX)
+    connection.execute(FUTURES_RECOMMENDATION_GENERATION_AUDIT_REFERENCE_SCHEMA)
+    connection.execute(FUTURES_RECOMMENDATION_GENERATION_AUDIT_RECORDED_INDEX)
     connection.commit()
