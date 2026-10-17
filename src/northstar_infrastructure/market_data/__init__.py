@@ -8,6 +8,22 @@ from northstar_infrastructure.market_data.databento_futures_historical_market_da
 from northstar_infrastructure.market_data.exchange_calendar_futures_session import (
     ExchangeCalendarFuturesTradingSessionResolver,
 )
+from northstar_infrastructure.market_data.historical_futures_contract_reference import (
+    SYNTHETIC_REFERENCE_AUTHORITY_PREFIX,
+    HistoricalFuturesCalendarFinding,
+    HistoricalFuturesCalendarStatus,
+    HistoricalFuturesContractCutoffSource,
+    HistoricalFuturesContractReference,
+    HistoricalFuturesContractReferenceCatalog,
+    HistoricalFuturesContractReferenceError,
+    HistoricalFuturesLotSize,
+    HistoricalFuturesReferenceCalendarCheck,
+    HistoricalFuturesReferenceKind,
+    HistoricalFuturesReferenceSource,
+    HistoricalFuturesReferenceUnavailableError,
+    HistoricalFuturesTickSize,
+    check_historical_futures_reference_calendar,
+)
 from northstar_infrastructure.market_data.nse_futures_session import (
     NSEFuturesTradingSessionResolver,
 )
@@ -186,4 +202,18 @@ __all__ = [
     "UpstoxOptionNativeDailyMarketDataSource",
     "SQLiteOptionChainDailyBarRepository",
     "SQLiteOptionListedContractRepository",
+    "SYNTHETIC_REFERENCE_AUTHORITY_PREFIX",
+    "HistoricalFuturesCalendarFinding",
+    "HistoricalFuturesCalendarStatus",
+    "HistoricalFuturesContractCutoffSource",
+    "HistoricalFuturesContractReference",
+    "HistoricalFuturesContractReferenceCatalog",
+    "HistoricalFuturesContractReferenceError",
+    "HistoricalFuturesLotSize",
+    "HistoricalFuturesReferenceCalendarCheck",
+    "HistoricalFuturesReferenceKind",
+    "HistoricalFuturesReferenceSource",
+    "HistoricalFuturesReferenceUnavailableError",
+    "HistoricalFuturesTickSize",
+    "check_historical_futures_reference_calendar",
 ]
