@@ -4,6 +4,7 @@ import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from northstar_application.ports import (
@@ -527,3 +528,23 @@ def test_source_with_concrete_exchange_calendar_resolver_end_to_end(tmp_path: Pa
     replayed = repository.get_history(query)
     assert len(replayed) == 4
     assert replayed == bars
+
+
+def test_fetch_history_percent_encodes_an_ampersand_in_the_provider_symbol() -> None:
+    # M&M is used here only as a provider symbol containing "&" (ADR-019); the
+    # request is captured offline and refused, so nothing is sent.
+    captured: list[str] = []
+
+    def fetch(url: str, timeout: float) -> bytes:
+        captured.append(url)
+        raise OSError("offline test: request captured, not sent")
+
+    source = YahooHistoricalMarketDataSource(FakeTradingSessionResolver(), fetch=fetch)
+
+    with pytest.raises(HistoricalMarketDataSourceError, match="unavailable"):
+        source.fetch_history(_make_query(symbol="M&M"))
+
+    assert len(captured) == 1
+    parts = urlsplit(captured[0])
+    assert parts.path == "/v8/finance/chart/M%26M"
+    assert set(parse_qs(parts.query)) == {"period1", "period2", "interval", "events"}
