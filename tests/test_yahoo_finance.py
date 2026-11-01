@@ -3,6 +3,7 @@
 import inspect
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from northstar_core.domain.value_objects import ListingReference
@@ -351,3 +352,23 @@ def test_display_metadata_is_absent_from_the_analysis_contract() -> None:
     assert not hasattr(context, "instrument")
     assert not hasattr(context.listing_reference, "name")
     assert not hasattr(context.listing_reference, "asset_class")
+
+
+def test_request_url_percent_encodes_an_ampersand_in_the_provider_symbol() -> None:
+    # "M&M.NS" is a Yahoo provider symbol, not a canonical NSE listing identity;
+    # the request is captured offline and refused, so nothing is sent.
+    captured: list[str] = []
+
+    def fetch(url: str, timeout: float) -> bytes:
+        captured.append(url)
+        raise OSError("offline test: request captured, not sent")
+
+    source = YahooFinanceMarketObservationSource(fetch=fetch)
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        source.get_observation_context(Symbol("M&M.NS"))
+
+    assert len(captured) == 1
+    parts = urlsplit(captured[0])
+    assert parts.path == "/v8/finance/chart/M%26M.NS"
+    assert set(parse_qs(parts.query)) == {"range", "interval", "events"}

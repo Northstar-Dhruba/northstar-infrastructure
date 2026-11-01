@@ -17,8 +17,9 @@ the invented bars. Every other step is the real implementation.
 Fixture data is invented
 ------------------------
 Every price and volume in this module is invented for this test. None is
-copied from, derived from or calibrated against real market data. RELIANCE and
-TCS are used only as NSE identities that the current Symbol contract accepts.
+copied from, derived from or calibrated against real market data. RELIANCE,
+TCS, M&M and MM are used only as NSE identities that the current Symbol
+contract accepts; M&M exercises the ampersand that ADR-019 added to Symbol.
 
 Fixture sessions are not an NSE calendar
 ----------------------------------------
@@ -789,3 +790,126 @@ def test_a_currency_change_is_refused_for_decisions_and_never_measured(
     ).execute(decision, ResearchHorizon(1), _DAILY, _session(_LAST_SESSION + 1))
     assert decision.market_observation_context.latest_price == last.close
     assert measurement.unavailable is RecommendationOutcomeUnavailableReason.CURRENCY_MISMATCH
+
+
+# G. Ampersand symbols (EI-1B, ADR-019)
+#
+# M&M is an invented series: it rises by 2.50 every session on steady volume,
+# runs eight sessions past the last decision so every decision can be measured
+# at every horizon, and is ingested under the exact canonical symbol "M&M".
+# Nothing here validates real NSE data for any symbol.
+
+_AMPERSAND = "M&M"
+_AMPERSAND_FREE = "MM"
+_AMPERSAND_FIRST_CLOSE = Decimal("1480.00")
+_AMPERSAND_STEP = Decimal("2.50")
+_AMPERSAND_VOLUMES = (Decimal("300000"),) * _FUTURE_LAST_SESSION
+_AMPERSAND_ACTIONS = ("BUY",) * 13
+_AMPERSAND_NSE = ListingReference(symbol=Symbol(_AMPERSAND), exchange_code=_NSE)
+
+
+def _ampersand_bars(exchange_code: ExchangeCode = _NSE) -> tuple[HistoricalOHLCVBar, ...]:
+    return _trend(
+        _AMPERSAND,
+        1,
+        _AMPERSAND_FIRST_CLOSE,
+        _AMPERSAND_STEP,
+        _AMPERSAND_VOLUMES,
+        exchange_code=exchange_code,
+    )
+
+
+def _ampersand_free_bars() -> tuple[HistoricalOHLCVBar, ...]:
+    return _trend(
+        _AMPERSAND_FREE, 1, Decimal("75.00"), Decimal("-0.40"), (Decimal("50000"),) * _LAST_SESSION
+    )
+
+
+def _ampersand_bse_bars() -> tuple[HistoricalOHLCVBar, ...]:
+    return _trend(
+        _AMPERSAND,
+        1,
+        Decimal("1475.00"),
+        Decimal("-2.40"),
+        (Decimal("9000"),) * _LAST_SESSION,
+        exchange_code=ExchangeCode("BSE"),
+    )
+
+
+def test_ampersand_symbol_survives_ingestion_storage_and_replay(database_path: Path) -> None:
+    bars = _ampersand_bars()
+
+    result = _ingest(database_path, bars)
+    rows = _stored_rows(database_path)
+    snapshots = _replay(database_path, _AMPERSAND, _FUTURE_LAST_SESSION)
+
+    assert result.acquired_count == result.stored_count == _FUTURE_LAST_SESSION
+    assert {row[:4] for row in rows} == {("M&M", "NSE", "1d", "INR")}
+    assert len(rows) == _FUTURE_LAST_SESSION
+    repository = SQLiteHistoricalMarketDataRepository(database_path)
+    assert repository.get_history(_query(_AMPERSAND, _FUTURE_LAST_SESSION)) == bars
+    assert len(snapshots) == _FUTURE_LAST_SESSION
+    for snapshot in snapshots:
+        assert {bar.symbol.value for bar in snapshot.observations} == {"M&M"}
+        assert {bar.exchange_code for bar in snapshot.observations} == {_NSE}
+
+
+def test_ampersand_listing_is_researched_and_measured_end_to_end(database_path: Path) -> None:
+    _ingest(database_path, _ampersand_bars())
+
+    run = _run(
+        database_path,
+        _AMPERSAND,
+        _LAST_SESSION,
+        available_through=_session(_FUTURE_LAST_SESSION),
+    )
+    metrics = CalculateHistoricalResearchMetricsUseCase().execute(run)
+
+    assert _actions(run.evaluations) == _AMPERSAND_ACTIONS
+    assert str(_AMPERSAND_NSE) == "M&M@NSE"
+    for evaluation in run.evaluations:
+        result = evaluation.result
+        assert result.recommendation.asset_analysis.listing_reference == _AMPERSAND_NSE
+        assert result.market_observation_context.listing_reference == _AMPERSAND_NSE
+        assert result.market_observation_context.latest_price.currency == _INR
+    assert len(run.measurements) == len(run.evaluations) * len(_HORIZONS)
+    for measurement in run.measurements:
+        assert measurement.recommendation.asset_analysis.listing_reference == _AMPERSAND_NSE
+        assert measurement.unavailable is None
+        assert measurement.outcome is not None
+        assert measurement.outcome.forward_return.value > 0
+    for horizon_metrics in metrics:
+        assert horizon_metrics.total_count == horizon_metrics.measured_count == 13
+
+
+def test_ampersand_symbol_is_distinct_from_the_same_letters_without_it(
+    database_path: Path,
+) -> None:
+    _ingest(database_path, _ampersand_bars())
+    _ingest(database_path, _ampersand_free_bars())
+    repository = SQLiteHistoricalMarketDataRepository(database_path)
+
+    assert {row[0] for row in _stored_rows(database_path)} == {"M&M", "MM"}
+    assert repository.get_history(_query(_AMPERSAND, _FUTURE_LAST_SESSION)) == _ampersand_bars()
+    assert repository.get_history(_query(_AMPERSAND_FREE)) == _ampersand_free_bars()
+    assert _actions(_evaluate(database_path, _AMPERSAND)) == _AMPERSAND_ACTIONS
+    assert _actions(_evaluate(database_path, _AMPERSAND_FREE)) == ("SELL",) * 13
+    assert _AMPERSAND_NSE != ListingReference(symbol=Symbol(_AMPERSAND_FREE), exchange_code=_NSE)
+
+
+def test_ampersand_symbol_on_another_exchange_is_a_separate_listing(database_path: Path) -> None:
+    _ingest(database_path, _ampersand_bars())
+    _ingest(database_path, _ampersand_bse_bars())
+    repository = SQLiteHistoricalMarketDataRepository(database_path)
+    bse = ExchangeCode("BSE")
+    bse_listing = ListingReference(symbol=Symbol(_AMPERSAND), exchange_code=bse)
+
+    assert repository.get_history(_query(_AMPERSAND, _FUTURE_LAST_SESSION)) == _ampersand_bars()
+    assert repository.get_history(_query(_AMPERSAND, exchange_code=bse)) == _ampersand_bse_bars()
+    assert _actions(_evaluate(database_path, _AMPERSAND)) == _AMPERSAND_ACTIONS
+    bse_repository_query = _query(_AMPERSAND, exchange_code=bse)
+    bse_snapshots = ReplayHistoricalMarketDataUseCase(repository).execute(bse_repository_query)
+    bse_decision = _evaluator().evaluate(bse_snapshots[-1])
+    assert bse_decision.recommendation.asset_analysis.listing_reference == bse_listing
+    assert str(bse_listing) == "M&M@BSE"
+    assert bse_listing != _AMPERSAND_NSE
