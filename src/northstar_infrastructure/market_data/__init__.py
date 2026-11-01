@@ -110,6 +110,13 @@ from northstar_infrastructure.market_data.sqlite_schema import (
     HISTORICAL_MARKET_DATA_SCHEMA,
     initialize_historical_market_data_schema,
 )
+from northstar_infrastructure.market_data.synthetic_equity_session import (
+    InvalidSyntheticEquitySessionReferenceError,
+    SyntheticEquityPhaseHours,
+    SyntheticEquitySessionReference,
+    SyntheticEquitySpecialSession,
+    SyntheticEquityTradingSessionResolver,
+)
 from northstar_infrastructure.market_data.upstox_candle_evidence import (
     MalformedUpstoxCandleEvidenceError,
     TruncatedUpstoxCandleEvidenceError,
@@ -164,6 +171,11 @@ __all__ = [
     "MalformedUpstoxCandleEvidenceError",
     "NSEFuturesTradingSessionResolver",
     "NSEOptionExpirationResolver",
+    "InvalidSyntheticEquitySessionReferenceError",
+    "SyntheticEquityPhaseHours",
+    "SyntheticEquitySessionReference",
+    "SyntheticEquitySpecialSession",
+    "SyntheticEquityTradingSessionResolver",
     "SQLiteFuturesHistoricalMarketDataRepository",
     "SQLiteFuturesHistoricalMarketDataStore",
     "SQLiteHistoricalMarketDataRepository",
