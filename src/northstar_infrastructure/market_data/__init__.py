@@ -148,6 +148,10 @@ from northstar_infrastructure.market_data.sqlite_schema import (
     HISTORICAL_MARKET_DATA_SCHEMA,
     initialize_historical_market_data_schema,
 )
+from northstar_infrastructure.market_data.synthetic_equity_candle_events import (
+    InvalidSyntheticEquityCandleEventError,
+    SyntheticEquityCandleEventSource,
+)
 from northstar_infrastructure.market_data.synthetic_equity_listing_applicability import (
     InvalidSyntheticListingApplicabilityError,
     SyntheticListingApplicabilityRecord,
@@ -218,6 +222,8 @@ __all__ = [
     "NoApprovedEquityListingApplicabilitySource",
     "NSEEquityVenueDayReferenceSource",
     "NSEEquityResearchReferenceProvenance",
+    "InvalidSyntheticEquityCandleEventError",
+    "SyntheticEquityCandleEventSource",
     "InvalidSyntheticListingApplicabilityError",
     "SyntheticListingApplicabilityRecord",
     "SyntheticListingApplicabilitySource",
