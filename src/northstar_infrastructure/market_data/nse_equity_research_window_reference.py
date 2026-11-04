@@ -75,6 +75,11 @@ class NSEEquityVenueDayReferenceSource(EquityVenueDayReferenceSource):
         """Return the source over the reviewed production catalog."""
         return cls(NSEEquityVenueSessionReference.production())
 
+    @property
+    def is_production(self) -> bool:
+        """Return whether this source answers from the reviewed production catalog object."""
+        return self._reference.catalog.is_production
+
     def venue_day(self, exchange_code: ExchangeCode, trading_date: date) -> EquityVenueDayReference:
         """Return the common continuous boundary of ``trading_date``, or why there is none."""
         day = self._reference.lookup(exchange_code, trading_date)

@@ -1,5 +1,16 @@
 """Persistence repositories subpackage."""
 
+from northstar_infrastructure.persistence.sqlite_equity_candle_evidence import (
+    EquityCandleEvidenceStorageError,
+    SQLiteEquityCandleEvidenceJournal,
+    SQLiteEquityCandleEvidenceSnapshotStore,
+)
+from northstar_infrastructure.persistence.sqlite_equity_candle_evidence_schema import (
+    EQUITY_CANDLE_EVIDENCE_SNAPSHOT_ENTRY_SCHEMA,
+    EQUITY_CANDLE_EVIDENCE_SNAPSHOT_SCHEMA,
+    EQUITY_CANDLE_JOURNAL_SCHEMA,
+    initialize_equity_candle_evidence_schema,
+)
 from northstar_infrastructure.persistence.sqlite_forward_research_records import (
     ForwardResearchStorageError,
     SQLiteForwardResearchRecordRepository,
@@ -89,6 +100,13 @@ from northstar_infrastructure.persistence.sqlite_paper_fills import (
 )
 
 __all__ = [
+    "EQUITY_CANDLE_EVIDENCE_SNAPSHOT_ENTRY_SCHEMA",
+    "EQUITY_CANDLE_EVIDENCE_SNAPSHOT_SCHEMA",
+    "EQUITY_CANDLE_JOURNAL_SCHEMA",
+    "EquityCandleEvidenceStorageError",
+    "SQLiteEquityCandleEvidenceJournal",
+    "SQLiteEquityCandleEvidenceSnapshotStore",
+    "initialize_equity_candle_evidence_schema",
     "FORWARD_RESEARCH_RECORD_SCHEMA",
     "PAPER_FILL_PORTFOLIO_INDEX",
     "PAPER_FILL_SCHEMA",

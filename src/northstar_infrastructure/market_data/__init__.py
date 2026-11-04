@@ -46,6 +46,9 @@ from northstar_infrastructure.market_data.nse_accepted_equity_session_evidence i
 from northstar_infrastructure.market_data.nse_accepted_reference_evidence import (
     PRODUCTION_ACCEPTED_EVIDENCE,
 )
+from northstar_infrastructure.market_data.nse_equity_reference_provenance import (
+    NSEEquityResearchReferenceProvenance,
+)
 from northstar_infrastructure.market_data.nse_equity_research_window_reference import (
     NO_APPROVED_APPLICABILITY_SOURCE,
     NoApprovedEquityListingApplicabilitySource,
@@ -214,6 +217,7 @@ __all__ = [
     "NO_APPROVED_APPLICABILITY_SOURCE",
     "NoApprovedEquityListingApplicabilitySource",
     "NSEEquityVenueDayReferenceSource",
+    "NSEEquityResearchReferenceProvenance",
     "InvalidSyntheticListingApplicabilityError",
     "SyntheticListingApplicabilityRecord",
     "SyntheticListingApplicabilitySource",
