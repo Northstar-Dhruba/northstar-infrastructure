@@ -98,6 +98,7 @@ from northstar_application.application_services import (
 from northstar_application.ports import (
     EquityCandleEvidenceJournal,
     EquityCandleEvidenceSnapshotStore,
+    EquityCandleEvidenceUnavailableError,
     EquityCandleSnapshotConflictError,
     EquityCandleSnapshotEvidenceError,
     InvalidEquityCandleJournalQueryError,
@@ -173,8 +174,13 @@ _SELECT_SNAPSHOT_ENTRIES = (
 )
 
 
-class EquityCandleEvidenceStorageError(RuntimeError):
-    """Raised when evidence storage is unavailable or holds invalid data."""
+class EquityCandleEvidenceStorageError(EquityCandleEvidenceUnavailableError):
+    """Raised when evidence storage is unavailable or holds invalid data.
+
+    It is the Application port's EquityCandleEvidenceUnavailableError (a
+    RuntimeError), so orchestration can tell an operational failure from a
+    rejected record without importing Infrastructure.
+    """
 
 
 def _utc_now() -> datetime:
