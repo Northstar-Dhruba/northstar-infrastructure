@@ -46,6 +46,11 @@ from northstar_infrastructure.market_data.nse_accepted_equity_session_evidence i
 from northstar_infrastructure.market_data.nse_accepted_reference_evidence import (
     PRODUCTION_ACCEPTED_EVIDENCE,
 )
+from northstar_infrastructure.market_data.nse_equity_research_window_reference import (
+    NO_APPROVED_APPLICABILITY_SOURCE,
+    NoApprovedEquityListingApplicabilitySource,
+    NSEEquityVenueDayReferenceSource,
+)
 from northstar_infrastructure.market_data.nse_equity_session_reference import (
     PRODUCTION_EQUITY_SESSION_AUTHORITY_PREFIX,
     TEST_EQUITY_SESSION_AUTHORITY_PREFIX,
@@ -140,6 +145,11 @@ from northstar_infrastructure.market_data.sqlite_schema import (
     HISTORICAL_MARKET_DATA_SCHEMA,
     initialize_historical_market_data_schema,
 )
+from northstar_infrastructure.market_data.synthetic_equity_listing_applicability import (
+    InvalidSyntheticListingApplicabilityError,
+    SyntheticListingApplicabilityRecord,
+    SyntheticListingApplicabilitySource,
+)
 from northstar_infrastructure.market_data.synthetic_equity_session import (
     InvalidSyntheticEquitySessionReferenceError,
     SyntheticEquityPhaseHours,
@@ -201,6 +211,12 @@ __all__ = [
     "MalformedUpstoxCandleEvidenceError",
     "NSEFuturesTradingSessionResolver",
     "NSEOptionExpirationResolver",
+    "NO_APPROVED_APPLICABILITY_SOURCE",
+    "NoApprovedEquityListingApplicabilitySource",
+    "NSEEquityVenueDayReferenceSource",
+    "InvalidSyntheticListingApplicabilityError",
+    "SyntheticListingApplicabilityRecord",
+    "SyntheticListingApplicabilitySource",
     "PRODUCTION_ACCEPTED_EQUITY_SESSION_EVIDENCE",
     "PRODUCTION_EQUITY_SESSION_AUTHORITY_PREFIX",
     "PRODUCTION_NSE_EQUITY_SESSION_CATALOG",
