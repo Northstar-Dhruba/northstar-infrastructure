@@ -637,15 +637,19 @@ def test_r_an_attempt_identity_reused_for_other_content_fails_closed(world: Worl
     row = list(adapter_module.attempt_row(other))
     row[0] = attempt.attempt_identity  # the CHECKs pass: SHA-256 is the Application's
     _insert(world.database, ATTEMPTS, adapter_module.ATTEMPT_COLUMNS, tuple(row))
+    stored = _rows(world.database, ATTEMPTS)
+    # The adapter raises the typed error; it never classifies a stored row.
     with pytest.raises(InvalidEquityRecommendationRecordError):
         world.store().load_attempt(attempt.attempt_identity)
     with pytest.raises(InvalidEquityRecommendationRecordError):
         world.store().record_attempt(attempt)
-    # The EI-4D-A recorder classifies an invalid stored row only on the disposition
-    # path; on the attempt-only path the typed error reaches the caller.
-    with pytest.raises(InvalidEquityRecommendationRecordError):
-        world.recorder().execute(world.attempt_only())
+    # The EI-4D-A recorder maps it: invalid, not stored, recording state unknown.
+    result = world.recorder().execute(world.attempt_only())
+    assert result.outcome is _O.STORED_RECORD_INVALID
+    assert not result.is_stored
+    assert result.attempt_recorded is None
     assert _counts(world.database) == (0, 1)
+    assert _rows(world.database, ATTEMPTS) == stored  # never repaired or replaced
 
 
 # ----------------------------------------------------------------------
@@ -1165,11 +1169,19 @@ def test_ai_a_tampered_attempt_fails_closed(world: World) -> None:
         (f"UPDATE {ATTEMPTS} SET attempt_document = ?", (reordered,)),  # noqa: S608
         drop=(f"{ATTEMPTS}_no_update",),
     )
+    stored = _rows(world.database, ATTEMPTS)
+    # The adapter raises the typed error; it never classifies a stored row.
     with pytest.raises(InvalidEquityRecommendationRecordError):
         world.store().load_attempt(attempt.attempt_identity)
-    with pytest.raises(InvalidEquityRecommendationRecordError):  # typed, never swallowed
-        world.recorder().execute(world.attempt_only())
+    with pytest.raises(InvalidEquityRecommendationRecordError):
+        world.store().record_attempt(attempt)
+    # The EI-4D-A recorder maps it: invalid, not stored, recording state unknown.
+    result = world.recorder().execute(world.attempt_only())
+    assert result.outcome is _O.STORED_RECORD_INVALID
+    assert not result.is_stored
+    assert result.attempt_recorded is None
     assert _counts(world.database) == (0, 1)
+    assert _rows(world.database, ATTEMPTS) == stored  # never repaired or replaced
 
 
 @pytest.mark.parametrize(
