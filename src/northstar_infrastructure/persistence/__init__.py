@@ -21,6 +21,14 @@ from northstar_infrastructure.persistence.sqlite_equity_intraday_research_timeli
     EQUITY_INTRADAY_RESEARCH_TIMELINE_SCHEMA,
     initialize_equity_intraday_research_timeline_schema,
 )
+from northstar_infrastructure.persistence.sqlite_equity_recommendation_generation import (
+    SQLiteEquityRecommendationGenerationStore,
+)
+from northstar_infrastructure.persistence.sqlite_equity_recommendation_generation_schema import (
+    EQUITY_RECOMMENDATION_GENERATION_ATTEMPT_SCHEMA,
+    EQUITY_RECOMMENDATION_GENERATION_DISPOSITION_SCHEMA,
+    initialize_equity_recommendation_generation_schema,
+)
 from northstar_infrastructure.persistence.sqlite_forward_research_records import (
     ForwardResearchStorageError,
     SQLiteForwardResearchRecordRepository,
@@ -123,6 +131,10 @@ __all__ = [
     "EQUITY_INTRADAY_RESEARCH_TIMELINE_SCHEMA",
     "initialize_equity_intraday_research_timeline_schema",
     "initialize_equity_candle_evidence_schema",
+    "EQUITY_RECOMMENDATION_GENERATION_ATTEMPT_SCHEMA",
+    "EQUITY_RECOMMENDATION_GENERATION_DISPOSITION_SCHEMA",
+    "SQLiteEquityRecommendationGenerationStore",
+    "initialize_equity_recommendation_generation_schema",
     "FORWARD_RESEARCH_RECORD_SCHEMA",
     "PAPER_FILL_PORTFOLIO_INDEX",
     "PAPER_FILL_SCHEMA",
