@@ -62,6 +62,10 @@ Failures
   SQLite may or may not have made the transaction durable; nothing is
   asserted, and the Application reconciles by reload (EI4-D9-G).
 
+Cleanup -- rolling back or closing a connection that may already have failed
+-- never replaces the failure being reported and is never taken as evidence
+that a transaction was rolled back.
+
 The store never retries, sleeps, reads a clock or works in the background.
 """
 
@@ -338,12 +342,31 @@ def _insert_attempt(connection: sqlite3.Connection, values: tuple[object, ...]) 
     connection.execute(_INSERT_ATTEMPT, values)
 
 
+def _close(connection: sqlite3.Connection) -> None:
+    connection.close()
+
+
 def _rollback(connection: sqlite3.Connection) -> None:
-    if connection.in_transaction:
-        try:
+    """Roll back an open transaction; never mask the failure that led here.
+
+    A connection that already failed or closed -- for example around COMMIT --
+    cannot even report whether a transaction is open, so nothing is asserted
+    about it: a transaction that never reached COMMIT ends rolled back when its
+    connection closes, and one whose COMMIT failed stays unconfirmed.
+    """
+    try:
+        if connection.in_transaction:
             connection.rollback()
-        except sqlite3.Error:
-            pass  # Closing the connection rolls the transaction back.
+    except sqlite3.Error:
+        pass
+
+
+def _discard(connection: sqlite3.Connection) -> None:
+    """Close a connection as a failure propagates; a close failure never replaces it."""
+    try:
+        _close(connection)
+    except sqlite3.Error:
+        pass
 
 
 def _attempt_unless_stored(
@@ -449,7 +472,11 @@ class SQLiteEquityRecommendationGenerationStore(EquityRecommendationGenerationSt
     def _write(
         self, work: Callable[[sqlite3.Connection], EquityRecommendationStoreWrite]
     ) -> EquityRecommendationStoreWrite:
-        """Run ``work`` in one BEGIN IMMEDIATE transaction and commit it once."""
+        """Run ``work`` in one BEGIN IMMEDIATE transaction and commit it once.
+
+        On failure the connection is discarded without letting cleanup replace
+        the typed failure; after a confirmed COMMIT it is closed normally.
+        """
         connection = _connect(self._database_path)
         try:
             try:
@@ -470,6 +497,8 @@ class SQLiteEquityRecommendationGenerationStore(EquityRecommendationGenerationSt
                 raise EquityRecommendationGenerationCommitUnconfirmedError(
                     f"COMMIT failed; whether the generation records are durable is unknown: {exc}"
                 ) from exc
-            return written
-        finally:
-            connection.close()
+        except BaseException:
+            _discard(connection)
+            raise
+        _close(connection)
+        return written
