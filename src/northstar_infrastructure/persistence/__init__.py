@@ -29,6 +29,15 @@ from northstar_infrastructure.persistence.sqlite_equity_recommendation_generatio
     EQUITY_RECOMMENDATION_GENERATION_DISPOSITION_SCHEMA,
     initialize_equity_recommendation_generation_schema,
 )
+from northstar_infrastructure.persistence.sqlite_equity_synthetic_policy_catalog import (
+    SQLiteEquitySyntheticPolicyCatalogStore,
+)
+from northstar_infrastructure.persistence.sqlite_equity_synthetic_policy_catalog_schema import (
+    EQUITY_SYNTHETIC_POLICY_DEFINITION_SCHEMA,
+    EQUITY_SYNTHETIC_POLICY_PUBLICATION_SCHEMA,
+    EQUITY_SYNTHETIC_POLICY_SET_SCHEMA,
+    initialize_equity_synthetic_policy_catalog_schema,
+)
 from northstar_infrastructure.persistence.sqlite_forward_research_records import (
     ForwardResearchStorageError,
     SQLiteForwardResearchRecordRepository,
@@ -190,4 +199,9 @@ __all__ = [
     "SQLiteFuturesTradeRecommendationLifecycleStore",
     "SQLiteFuturesTradeRecommendationRepository",
     "SQLiteFuturesTradeRecommendationStore",
+    "SQLiteEquitySyntheticPolicyCatalogStore",
+    "EQUITY_SYNTHETIC_POLICY_DEFINITION_SCHEMA",
+    "EQUITY_SYNTHETIC_POLICY_PUBLICATION_SCHEMA",
+    "EQUITY_SYNTHETIC_POLICY_SET_SCHEMA",
+    "initialize_equity_synthetic_policy_catalog_schema",
 ]
