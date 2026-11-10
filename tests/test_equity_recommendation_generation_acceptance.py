@@ -47,10 +47,12 @@ from northstar_application.application_services import (
     EquityRecommendationEligibilityReason,
     EquityRecommendationGenerationStatus,
     EquityRecommendationRecordingOutcome,
+    EquitySyntheticPolicyPublicationOutcome,
     EquityTradeRecommendationRequest,
     EvaluateEquityIntradayResearchUseCase,
     GenerateEquityTradeRecommendationUseCase,
     InvalidEquityTradeRecommendationRequestError,
+    PublishEquitySyntheticPoliciesUseCase,
     assess_equity_recommendation_inputs,
     equity_modeled_issuance,
     equity_recommendation_attempt,
@@ -95,6 +97,7 @@ from tests.equity_recommendation_acceptance_fixtures import (
     counts,
     establish_research,
     ist,
+    policy_bundle,
     prior,
     raw,
     request,
@@ -490,6 +493,7 @@ def _wrong_snapshot_store(pipeline: Pipeline, tmp: Path) -> None:
             pipeline.references,
             pipeline.eligibility,
             pipeline.history,
+            pipeline.catalog(),
         )
 
     pipeline.generator = miswired  # type: ignore[method-assign]
@@ -636,8 +640,15 @@ def test_e12_a_b_f_one_key_per_candidate_and_approved_policy_set(
         for name, changes in {
             "set/1": {},
             "another set version": {"set_version": "set/2"},
-            "another generation policy": {"generation": "generation/strict"},
-            "another timing policy": {"timing": "timing/on-opening"},
+            # EI4-D10: a set naming other components is another set label.
+            "another generation policy": {
+                "generation": "generation/strict",
+                "set_version": "set/strict",
+            },
+            "another timing policy": {
+                "timing": "timing/on-opening",
+                "set_version": "set/on-opening",
+            },
         }.items()
     }
     assert len(set(keys.values())) == 4  # B: every component change is another identity
@@ -647,28 +658,58 @@ def test_e12_a_b_f_one_key_per_candidate_and_approved_policy_set(
     assert counts(pipeline.database) == (1, 1)
 
 
-def test_e12_c_a_reused_version_label_with_changed_content_is_another_identity(
+_CATALOG_TABLES = (
+    "equity_synthetic_policy_publications",
+    "equity_synthetic_policy_definitions",
+    "equity_synthetic_policy_sets",
+)
+
+
+def _catalog_rows(pipeline: Pipeline) -> dict[str, list[dict[str, Any]]]:
+    return {table: rows(pipeline.database, table) for table in _CATALOG_TABLES}
+
+
+def test_e12_c_a_reused_version_label_with_changed_content_is_a_permanent_conflict(
     pipeline: Pipeline, research: Research
 ) -> None:
+    # EI-4E AA-1 showed that "timing/1" could name other content and yield a
+    # second generation key and disposition. EI4-D10 (ADR-022, DQ6) forbids it:
+    # the published label keeps its first content, and reuse fails closed.
     original = pipeline.generate()
     assert pipeline.recorder().execute(original).outcome is _O.COMMITTED
     before = rows(pipeline.database, DISPOSITIONS)
+    catalog = _catalog_rows(pipeline)
     # The same label "timing/1" now names other content: a 240 s latency, not 150 s.
     pipeline.references.timing["timing/1"] = timing_policy("timing/1", timedelta(minutes=4))
+    # 1. Explicit republication of the changed content is refused, once, never retried.
+    republished = PublishEquitySyntheticPoliciesUseCase(pipeline.catalog()).execute(
+        policy_bundle(pipeline.references)
+    )
+    assert republished.outcome is EquitySyntheticPolicyPublicationOutcome.POLICY_REFERENCE_CONFLICT
+    assert republished.writes == 1 and republished.conflicts
+    assert _catalog_rows(pipeline) == catalog  # the first binding is unchanged
+    # 2. Generation fails closed with the permanent conflict: no key, no inputs.
     relabelled = pipeline.generate()
     assert relabelled.request == original.request  # every version label is identical
-    assert relabelled.inputs is not None and original.inputs is not None
-    assert relabelled.inputs.policy_set.fingerprint != original.inputs.policy_set.fingerprint
-    assert relabelled.generation_key != original.generation_key  # never the identical set
+    assert relabelled.status is _S.DEPENDENCY_UNAVAILABLE
+    assert relabelled.reasons == (_R.POLICY_REFERENCE_CONFLICT,)
+    assert relabelled.generation_key is None and relabelled.inputs is None
+    # 3. Recording keeps only the attempt-only audit; no second disposition exists.
     result = pipeline.recorder().execute(relabelled)
-    assert result.outcome is _O.COMMITTED
-    stored = {r["generation_key"]: r for r in rows(pipeline.database, DISPOSITIONS)}
-    assert stored[original.generation_key] == before[0]  # the first record is untouched
-    policies = {
-        key: _document(row["assessment_document"])["inputs"]["policy_set"]["timing_policy"]
-        for key, row in stored.items()
-    }
-    assert policies[original.generation_key] != policies[relabelled.generation_key]
+    assert (result.outcome, result.disposition, result.attempt_recorded) == (
+        _O.COMMITTED,
+        None,
+        True,
+    )
+    assert rows(pipeline.database, DISPOSITIONS) == before  # the first record is untouched
+    assert counts(pipeline.database) == (1, 2)
+    assert _catalog_rows(pipeline) == catalog  # generation and recording never publish
+    # A legitimate change takes a new label -- for the component and for the set.
+    pipeline.references.timing["timing/2"] = timing_policy("timing/2", timedelta(minutes=4))
+    pipeline.publish(policy_bundle(pipeline.references, "set/3", timing="timing/2"))
+    changed = pipeline.generate(set_version="set/3", timing="timing/2")
+    assert changed.status is _S.PROPOSED
+    assert changed.generation_key not in (None, original.generation_key)
 
 
 @pytest.mark.parametrize("change", ["eligibility universe", "eligibility verdict", "history"])
@@ -755,6 +796,10 @@ def test_e13_a_signal_after_the_policy_cutoff_is_refused(
     pipeline.references.timing["timing/early-cutoff"] = replace(
         timing_policy("timing/early-cutoff", timedelta(seconds=150)),
         latest_signal_bar_end=time(9, 35),
+    )
+    # A new policy is used only once explicitly published (EI4-D10).
+    pipeline.publish(
+        policy_bundle(pipeline.references, "set/early-cutoff", timing="timing/early-cutoff")
     )
     audit = pipeline.generate(timing="timing/early-cutoff", set_version="set/early-cutoff")
     assert audit.status is _S.NOT_ELIGIBLE and audit.reasons == (_R.AFTER_SIGNAL_CUTOFF,)
