@@ -24,9 +24,12 @@ from northstar_application.application_services import (
     EquityRecommendationGenerationDisposition,
     EquityRecommendationGenerationStatus,
     EquityRecommendationGenerationVerifier,
+    EquityResolvedSyntheticPolicySet,
+    EquitySyntheticPolicyBundle,
     EquitySyntheticPolicySetReference,
     EquityTradeRecommendationRequest,
     GenerateEquityTradeRecommendationUseCase,
+    PublishEquitySyntheticPoliciesUseCase,
     RecordEquityRecommendationGenerationUseCase,
     equity_recommendation_attempt,
     equity_recommendation_disposition,
@@ -57,7 +60,10 @@ from northstar_core.recommendations.equity import (
 )
 from northstar_core.strategy import StrategyIdentity
 
-from northstar_infrastructure.persistence import SQLiteEquityRecommendationGenerationStore
+from northstar_infrastructure.persistence import (
+    SQLiteEquityRecommendationGenerationStore,
+    SQLiteEquitySyntheticPolicyCatalogStore,
+)
 from tests.equity_intraday_research_timeline_fixtures import (
     CONFIG,
     DAY,
@@ -230,12 +236,35 @@ def request(
 
 Records = tuple[EquityRecommendationGenerationDisposition, EquityRecommendationGenerationAttempt]
 
+# The two synthetic policy sets the EI-4D-B world publishes (EI4-D10): the set
+# label names its generation label; the other components are the same.
+PUBLISHED_POLICY_SETS = (("set/1", "generation/1"), ("set/strict", "generation/strict"))
+
+
+def policy_bundle(
+    references: References, set_version: str = "set/1", generation: str = "generation/1"
+) -> EquitySyntheticPolicyBundle:
+    """The complete canonical bundle -- five components and the set -- of one set label."""
+    return EquitySyntheticPolicyBundle.of(
+        EquityResolvedSyntheticPolicySet(
+            reference=request(generation, set_version).policy_set,
+            generation_policy=references.generation[generation],
+            risk_policy=references.risk["risk/1"],
+            cost_schedule=references.costs["costs/1"],
+            price_increment=references.increment["increment/1"],
+            timing_policy=references.timing["timing/1"],
+        )
+    )
+
 
 class World:
     """One disposable evidence database with a committed EI-3C timeline.
 
     M&M's synthetic morning is journaled; snapshots at 09:36 and 09:41 IST are
     committed as the CANDIDATE (entry 1) and a REPEAT_QUALIFYING entry (2).
+    Then the synthetic policy sets are published explicitly, through the S1
+    use case, into the policy catalog of the same file (EI4-D10); the
+    generator and the recorder read that catalog and never write it.
     """
 
     def __init__(self, database: Path) -> None:
@@ -247,6 +276,13 @@ class World:
         self.references = References()
         self.eligibility = Eligibility()
         self.history = History()
+        publisher = PublishEquitySyntheticPoliciesUseCase(self.catalog())
+        for set_version, generation in PUBLISHED_POLICY_SETS:
+            published = publisher.execute(policy_bundle(self.references, set_version, generation))
+            assert published.is_published, (published.outcome, published.conflicts)
+
+    def catalog(self) -> SQLiteEquitySyntheticPolicyCatalogStore:
+        return SQLiteEquitySyntheticPolicyCatalogStore(self.database)
 
     def generator(self) -> GenerateEquityTradeRecommendationUseCase:
         fresh = Harness(self.database)
@@ -257,6 +293,7 @@ class World:
             self.references,
             self.eligibility,
             self.history,
+            self.catalog(),
         )
 
     def run(self, **changes: object) -> EquityRecommendationEligibilityAudit:
@@ -302,7 +339,7 @@ class World:
         max_writes: int = 3,
     ) -> RecordEquityRecommendationGenerationUseCase:
         return RecordEquityRecommendationGenerationUseCase(
-            store or self.store(), self.verifier(), max_writes
+            store or self.store(), self.verifier(), self.catalog(), max_writes
         )
 
 

@@ -54,6 +54,8 @@ from northstar_application.application_services import (
     EquityRecommendationGenerationDisposition,
     EquityRecommendationGenerationVerifier,
     EquityResearchEvidenceOutcome,
+    EquityResolvedSyntheticPolicySet,
+    EquitySyntheticPolicyBundle,
     EquitySyntheticPolicySetReference,
     EquityTradeRecommendationRequest,
     EvaluateEquityResearchWindowUseCase,
@@ -61,6 +63,7 @@ from northstar_application.application_services import (
     IngestSyntheticEquityCandleEventsUseCase,
     IssueEquityCandleEvidenceSnapshotUseCase,
     IssueEquityResearchEvidenceUseCase,
+    PublishEquitySyntheticPoliciesUseCase,
     RecordEquityRecommendationGenerationUseCase,
     VerifyStoredEquityRecommendationGenerationUseCase,
 )
@@ -111,6 +114,9 @@ from northstar_infrastructure.persistence import (
     SQLiteEquityCandleEvidenceSnapshotStore,
     SQLiteEquityIntradayResearchTimelineStore,
     SQLiteEquityRecommendationGenerationStore,
+    SQLiteEquitySyntheticPolicyCatalogStore,
+    initialize_equity_candle_evidence_schema,
+    initialize_equity_intraday_research_timeline_schema,
 )
 
 # ---------------------------------------------------------------------------
@@ -453,6 +459,41 @@ def policy_set(
     )
 
 
+# The synthetic policy sets the acceptance publishes (EI4-D10): every set label
+# names exactly one set of component labels, and every component label one
+# content. A set naming other components, or other content, is another label.
+PUBLISHED_POLICY_SETS: tuple[tuple[str, str, str], ...] = (
+    # (set label, generation label, timing label)
+    ("set/1", "generation/1", "timing/1"),
+    ("set/2", "generation/1", "timing/1"),
+    ("set/strict", "generation/strict", "timing/1"),
+    ("set/late", "generation/1", "timing/late"),
+    ("set/on-opening", "generation/1", "timing/on-opening"),
+    ("set/timing/1", "generation/1", "timing/1"),
+    ("set/timing/on-opening", "generation/1", "timing/on-opening"),
+    ("set/timing/late", "generation/1", "timing/late"),
+)
+
+
+def policy_bundle(
+    references: References,
+    set_version: str = "set/1",
+    generation: str = "generation/1",
+    timing: str = "timing/1",
+) -> EquitySyntheticPolicyBundle:
+    """The complete canonical bundle -- five components and the set -- for one set label."""
+    return EquitySyntheticPolicyBundle.of(
+        EquityResolvedSyntheticPolicySet(
+            reference=policy_set(set_version, generation, timing),
+            generation_policy=references.generation[generation],
+            risk_policy=references.risk["risk/1"],
+            cost_schedule=references.costs["costs/1"],
+            price_increment=references.increment["increment/1"],
+            timing_policy=references.timing[timing],
+        )
+    )
+
+
 def request(
     listing: ListingReference = TCS,
     configuration: EquityOpeningRangeBreakoutConfiguration = CONFIG,
@@ -476,7 +517,11 @@ class Pipeline:
     """The real EI-4C/EI-4D chain over one disposable database.
 
     Every call builds fresh adapters, which open and close their own
-    connections per operation; nothing is cached between calls.
+    connections per operation; nothing is cached between calls. The policy
+    catalog (EI4-D10) is the SQLite catalog in the SAME file: the generator
+    and the recorder read it, and only ``publish`` -- the S1 use case -- writes
+    it. ``catalog`` may name another file only for a labelled test that needs
+    a catalog other than the authority.
     """
 
     def __init__(self, database: Path) -> None:
@@ -488,7 +533,23 @@ class Pipeline:
     def evidence(self) -> Evidence:
         return Evidence(self.database)
 
-    def generator(self) -> GenerateEquityTradeRecommendationUseCase:
+    def catalog(self) -> SQLiteEquitySyntheticPolicyCatalogStore:
+        return SQLiteEquitySyntheticPolicyCatalogStore(self.database)
+
+    def publish(self, *bundles: EquitySyntheticPolicyBundle) -> None:
+        """Publish each complete bundle explicitly, through the S1 use case; nothing else does."""
+        publisher = PublishEquitySyntheticPoliciesUseCase(self.catalog())
+        for bundle in bundles:
+            result = publisher.execute(bundle)
+            assert result.is_published, (result.outcome, result.conflicts)
+
+    def publish_fixture_policies(self) -> None:
+        """Publish every synthetic policy set of PUBLISHED_POLICY_SETS."""
+        self.publish(*(policy_bundle(self.references, *row) for row in PUBLISHED_POLICY_SETS))
+
+    def generator(
+        self, catalog: SQLiteEquitySyntheticPolicyCatalogStore | None = None
+    ) -> GenerateEquityTradeRecommendationUseCase:
         fresh = self.evidence()
         return GenerateEquityTradeRecommendationUseCase(
             fresh.timelines,
@@ -497,6 +558,7 @@ class Pipeline:
             self.references,
             self.eligibility,
             self.history,
+            catalog or self.catalog(),
         )
 
     def generate(self, **changes: Any) -> EquityRecommendationEligibilityAudit:
@@ -510,10 +572,13 @@ class Pipeline:
         return EquityRecommendationGenerationVerifier(fresh.timelines, fresh.snapshots)
 
     def recorder(
-        self, store: SQLiteEquityRecommendationGenerationStore | None = None, max_writes: int = 3
+        self,
+        store: SQLiteEquityRecommendationGenerationStore | None = None,
+        max_writes: int = 3,
+        catalog: SQLiteEquitySyntheticPolicyCatalogStore | None = None,
     ) -> RecordEquityRecommendationGenerationUseCase:
         return RecordEquityRecommendationGenerationUseCase(
-            store or self.store(), self.verifier(), max_writes
+            store or self.store(), self.verifier(), catalog or self.catalog(), max_writes
         )
 
     def verify_stored(self) -> VerifyStoredEquityRecommendationGenerationUseCase:
@@ -530,14 +595,58 @@ class Research:
     advance: EquityIntradayResearchTimelineAdvance
 
 
-def establish_research(pipeline: Pipeline) -> Research:
-    """Steps 1-4: journal the TCS session, issue snapshots, commit the EI-3C timeline."""
+def establish_research(pipeline: Pipeline, *, publish: bool = True) -> Research:
+    """Steps 1-4: journal the TCS session, issue snapshots, commit the EI-3C timeline.
+
+    Then, explicitly, step 5 (EI4-D10): the synthetic policy sets are published
+    into the catalog of the same database through the S1 use case, before
+    anything is generated. ``publish=False`` leaves the catalog empty, for
+    tests of a database from before enforcement or of unpublished policies.
+    """
     evidence = pipeline.evidence()
     evidence.candles()
     s36, s41, s46 = (evidence.issue(ist(9, minute)) for minute in (36, 41, 46))
     advanced = evidence.advance([s36, s41, s46])
     assert advanced.status.value == "COMMITTED" and advanced.commit_confirmed, advanced.status
+    if publish:
+        pipeline.publish_fixture_policies()
     return Research(s36, s41, s46, advanced)
+
+
+def pre_enforcement_catalog(
+    pipeline: Pipeline, path: Path
+) -> SQLiteEquitySyntheticPolicyCatalogStore:
+    """TEST-ONLY HISTORICAL SIMULATION: the catalog of a record made before EI4-D10.
+
+    Before enforcement, no catalog existed in the evidence database. The S3
+    generator and recorder require one, so a record "from before" is made
+    through the ordinary, gated chain against a catalog in ANOTHER disposable
+    file, where the fixture policies are published. The database under test
+    keeps an empty catalog, so its record carries no publication evidence.
+    Never used for a record the test treats as made under enforcement.
+    """
+    return scratch_catalog(
+        path, *(policy_bundle(pipeline.references, *row) for row in PUBLISHED_POLICY_SETS)
+    )
+
+
+def scratch_catalog(
+    path: Path, *bundles: EquitySyntheticPolicyBundle
+) -> SQLiteEquitySyntheticPolicyCatalogStore:
+    """TEST-ONLY: a real SQLite catalog in ANOTHER disposable file -- never the authority.
+
+    ``bundles`` are published into it through the S1 use case. A generator
+    wired to it stands for a caller that bypasses the authoritative catalog,
+    or for a time before enforcement; the tests say which.
+    """
+    with closing(sqlite3.connect(path)) as connection:
+        initialize_equity_candle_evidence_schema(connection)
+        initialize_equity_intraday_research_timeline_schema(connection)
+    catalog = SQLiteEquitySyntheticPolicyCatalogStore(path)
+    publisher = PublishEquitySyntheticPoliciesUseCase(catalog)
+    for bundle in bundles:
+        assert publisher.execute(bundle).is_published
+    return catalog
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +772,7 @@ def record_in_another_process(
             SQLiteEquityIntradayResearchTimelineStore(path),
             SQLiteEquityCandleEvidenceSnapshotStore(path),
         ),
+        SQLiteEquitySyntheticPolicyCatalogStore(path),
     )
     built = EquityRecommendationGenerationAttempt(*attempt)
     start.wait(60)

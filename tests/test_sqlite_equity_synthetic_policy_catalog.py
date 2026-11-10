@@ -80,7 +80,9 @@ from tests.equity_recommendation_acceptance_fixtures import (
     bypass,
     check_database,
     establish_research,
+    pre_enforcement_catalog,
     raw,
+    request,
     rows,
     schema_objects,
 )
@@ -975,11 +977,15 @@ def test_an_existing_evidence_and_generation_database_is_extended_additively(
     tmp_path: Path,
 ) -> None:
     pipeline = Pipeline(tmp_path / "ei4e.sqlite3")
-    establish_research(pipeline)
-    audit = pipeline.generate()
+    establish_research(pipeline, publish=False)
+    # A generation record from before EI4-D10 enforcement: made through the
+    # ordinary gated chain against a test-only catalog in another file, so this
+    # database's own catalog stays empty (EI4-D10-S4).
+    before = pre_enforcement_catalog(pipeline, tmp_path / "pre-enforcement-catalog.sqlite3")
+    audit = pipeline.generator(before).execute(request())
     disposition = equity_recommendation_disposition(audit)
     assert disposition is not None and audit.inputs is not None
-    assert pipeline.recorder().execute(audit).outcome.value == "COMMITTED"
+    assert pipeline.recorder(catalog=before).execute(audit).outcome.value == "COMMITTED"
     database = pipeline.database
     objects = schema_objects(database)
     evidence = {t: rows(database, t) for t in (SNAPSHOTS, TIMELINES, ENTRIES, DISPOSITIONS)}
