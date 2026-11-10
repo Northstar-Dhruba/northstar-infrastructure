@@ -44,10 +44,13 @@ from northstar_application.application_services import (
 from northstar_application.ports import (
     EquityRecommendationGenerationCommitUnconfirmedError,
     EquityRecommendationGenerationNotCommittedError,
+    EquityRecommendationGenerationRecordReader,
+    EquityRecommendationGenerationRecordWriter,
     EquityRecommendationGenerationStore,
     EquityRecommendationGenerationStoreUnavailableError,
     EquityRecommendationStoreOutcome,
     EquityRecommendationStoreWrite,
+    UnverifiedEquityRecommendationGenerationWriteError,
 )
 
 from northstar_infrastructure.persistence import (
@@ -71,6 +74,7 @@ from tests.equity_recommendation_generation_fixtures import (
     records,
     relabelled,
 )
+from tests.equity_recommendation_write_authorization_fixtures import plant_generation_records
 
 _O = EquityRecommendationRecordingOutcome
 _W = EquityRecommendationStoreOutcome
@@ -203,16 +207,27 @@ def _with_document(
 
 
 def test_a_the_adapter_implements_the_merged_application_port() -> None:
-    port = EquityRecommendationGenerationStore
-    assert issubclass(SQLiteEquityRecommendationGenerationStore, port)
-    assert not getattr(SQLiteEquityRecommendationGenerationStore, "__abstractmethods__", None)
-    for name in ("load_disposition", "load_attempt", "record_generation", "record_attempt"):
-        assert name in port.__abstractmethods__
-        ours = inspect.signature(getattr(SQLiteEquityRecommendationGenerationStore, name))
-        theirs = inspect.signature(getattr(port, name))
-        assert list(ours.parameters) == list(theirs.parameters), name
-    public = {n for n in vars(SQLiteEquityRecommendationGenerationStore) if not n.startswith("_")}
-    assert public == {"load_disposition", "load_attempt", "record_generation", "record_attempt"}
+    # EI4-D11-W2-I: written to hold both now and after W3 removes the raw write
+    # signatures from the Application port (EI4-D11 design, section 22.4).
+    adapter = SQLiteEquityRecommendationGenerationStore
+    assert issubclass(adapter, EquityRecommendationGenerationRecordReader)
+    assert issubclass(adapter, EquityRecommendationGenerationRecordWriter)
+    assert issubclass(adapter, EquityRecommendationGenerationStore)
+    assert not getattr(adapter, "__abstractmethods__", None)
+    for port, names in (
+        (EquityRecommendationGenerationRecordReader, ("load_disposition", "load_attempt")),
+        (EquityRecommendationGenerationRecordWriter, ("write_generation", "write_attempt")),
+    ):
+        for name in names:
+            assert name in port.__abstractmethods__
+            ours = inspect.signature(getattr(adapter, name))
+            theirs = inspect.signature(getattr(port, name))
+            assert list(ours.parameters) == list(theirs.parameters), name
+            assert name in vars(adapter), f"{name} is the adapter's own, not a port default"
+    public = {n for n in vars(adapter) if not n.startswith("_")}
+    required = {"load_disposition", "load_attempt", "write_generation", "write_attempt"}
+    transitional = {"record_generation", "record_attempt"}  # refusing until W4-I removes them
+    assert required <= public <= required | transitional
 
 
 def test_b_a_new_evidence_database_acquires_the_generation_schema(tmp_path: Path) -> None:
@@ -405,7 +420,7 @@ def test_f_the_database_refuses_to_change_any_record(world: World, statement: st
 
 def test_g_h_duplicate_keys_and_identities_are_refused_by_the_database(world: World) -> None:
     disposition, attempt = records(world.proposed())
-    world.store().record_generation(disposition, attempt)
+    world.store().write_generation(world.authorize(world.proposed()))
     for table, columns, values in (
         (
             DISPOSITIONS,
@@ -526,10 +541,13 @@ def test_l_an_attempt_only_result_never_needs_or_creates_a_disposition(world: Wo
         None,
     )
     assert _counts(world.database) == (0, 1)
-    stored = world.store().record_attempt(attempt)
+    stored = world.store().write_attempt(world.authorize_attempt(attempt))
     assert (stored.outcome, stored.stored, stored.attempt_inserted) == (_W.EQUIVALENT, None, False)
     _, keyed = records(world.proposed())
-    with pytest.raises(ValueError, match="recorded with its disposition"):
+    # A keyed attempt is never authorized as attempt-only, and never written raw.
+    with pytest.raises(ValueError, match="recorded with it"):
+        world.recorder().record_attempt(keyed)
+    with pytest.raises(UnverifiedEquityRecommendationGenerationWriteError):
         world.store().record_attempt(keyed)
     assert _counts(world.database) == (0, 1)
 
@@ -538,6 +556,8 @@ def test_s_a_disposition_is_recorded_only_with_its_own_attempt(world: World) -> 
     proposed, _ = records(world.proposed())
     _, other = records(world.not_eligible())
     with pytest.raises(ValueError, match="not the attempt of this disposition"):
+        world.recorder().record(proposed, other)
+    with pytest.raises(UnverifiedEquityRecommendationGenerationWriteError):
         world.store().record_generation(proposed, other)
     _with_schema(world)
     assert _counts(world.database) == (0, 0)
@@ -550,9 +570,10 @@ def test_s_a_disposition_is_recorded_only_with_its_own_attempt(world: World) -> 
 
 def test_m_q_an_identical_retry_writes_nothing_new(world: World) -> None:
     disposition, attempt = records(world.proposed())
+    authorization = world.authorize(world.proposed())
     store = world.store()
-    first = store.record_generation(disposition, attempt)
-    again = world.store().record_generation(disposition, attempt)
+    first = store.write_generation(authorization)
+    again = world.store().write_generation(authorization)  # the identical operation again
     assert (first.outcome, first.stored, first.attempt_inserted) == (_W.COMMITTED, None, True)
     assert (again.outcome, again.stored, again.attempt_inserted) == (
         _W.EQUIVALENT,
@@ -569,7 +590,7 @@ def test_n_g_different_content_never_replaces_the_first_record(world: World) -> 
     assert unresolved.generation_key == proposed.generation_key  # one key, other content
     assert world.recorder().execute(world.unresolved()).outcome is _O.COMMITTED
     before = _rows(world.database, DISPOSITIONS)
-    written = world.store().record_generation(proposed, proposed_attempt)
+    written = world.store().write_generation(world.authorize(world.proposed()))
     assert (written.outcome, written.stored, written.attempt_inserted) == (
         _W.CONFLICT,
         unresolved,
@@ -593,10 +614,13 @@ def test_o_the_same_content_under_another_evaluator_is_a_conflict(world: World) 
         current.assessment_fingerprint,
         current.proposal_fingerprint,
     )
-    assert world.recorder().execute(world.proposed()).outcome is _O.COMMITTED
-    written = world.store().record_generation(other, attempt)
-    assert (written.outcome, written.stored) == (_W.CONFLICT, current)
-    assert _rows(world.database, DISPOSITIONS)[0]["evaluator_version"] == current.evaluator_version
+    # TEST-ONLY LEGACY-EVIDENCE SETUP: the current recorder never authorizes another
+    # evaluator's record, so it stands here as evidence planted by raw SQL.
+    _with_schema(world)
+    plant_generation_records(world.database, other, attempt)
+    written = world.store().write_generation(world.authorize(world.proposed()))
+    assert (written.outcome, written.stored) == (_W.CONFLICT, other)  # never equivalent
+    assert _rows(world.database, DISPOSITIONS)[0]["evaluator_version"] == FUTURE_EVALUATOR
 
 
 @pytest.mark.usefixtures("second_label")
@@ -604,7 +628,8 @@ def test_o_a_stored_record_of_another_evaluator_is_reported_never_adopted(
     world: World,
 ) -> None:
     current, attempt = records(world.proposed())
-    assert world.store().record_generation(relabelled(current), attempt).outcome is _W.COMMITTED
+    _with_schema(world)
+    plant_generation_records(world.database, relabelled(current), attempt)  # TEST-ONLY setup
     result = world.recorder().execute(world.proposed())
     assert result.outcome is _O.EVALUATOR_VERSION_CONFLICT
     assert result.authoritative is None and not result.is_stored
@@ -620,7 +645,10 @@ def test_p_an_unsupported_stored_evaluator_is_incompatible(world: World) -> None
             frozenset({EQUITY_RECOMMENDATION_EVALUATOR_VERSION, FUTURE_EVALUATOR}),
         )
         _, attempt = records(world.proposed())
-        world.store().record_generation(relabelled(disposition), attempt)
+        _with_schema(world)
+        # TEST-ONLY LEGACY-EVIDENCE SETUP: a record from an evaluator the recorder
+        # does not run is never authorized, so it is planted by raw SQL.
+        plant_generation_records(world.database, relabelled(disposition), attempt)
     # Only the current evaluator is supported again: the stored /2 record is incompatible.
     with pytest.raises(IncompatibleEquityRecommendationRecordError, match="not supported"):
         world.store().load_disposition(disposition.generation_key)
@@ -642,7 +670,7 @@ def test_r_an_attempt_identity_reused_for_other_content_fails_closed(world: Worl
     with pytest.raises(InvalidEquityRecommendationRecordError):
         world.store().load_attempt(attempt.attempt_identity)
     with pytest.raises(InvalidEquityRecommendationRecordError):
-        world.store().record_attempt(attempt)
+        world.store().write_attempt(world.authorize_attempt(attempt))
     # The EI-4D-A recorder maps it: invalid, not stored, recording state unknown.
     result = world.recorder().execute(world.attempt_only())
     assert result.outcome is _O.STORED_RECORD_INVALID
@@ -671,21 +699,21 @@ def _fail_attempt_insert(monkeypatch: pytest.MonkeyPatch, error: BaseException) 
 def test_s_t_a_failure_after_the_disposition_insert_leaves_nothing(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    disposition, attempt = records(world.proposed())
+    authorization = world.authorize(world.proposed())
     _fail_attempt_insert(monkeypatch, sqlite3.OperationalError("test: disk full"))
     with pytest.raises(
         EquityRecommendationGenerationNotCommittedError, match="nothing was written"
     ):
-        world.store().record_generation(disposition, attempt)
+        world.store().write_generation(authorization)
     assert _counts(world.database) == (0, 0)
     result = world.recorder().execute(world.proposed())
     assert result.outcome is _O.NOT_COMMITTED and result.attempt_recorded is False
     _fail_attempt_insert(monkeypatch, _Interrupted())
     with pytest.raises(_Interrupted):
-        world.store().record_generation(disposition, attempt)
+        world.store().write_generation(authorization)
     assert _counts(world.database) == (0, 0)
     monkeypatch.undo()
-    assert world.store().record_generation(disposition, attempt).outcome is _W.COMMITTED
+    assert world.store().write_generation(authorization).outcome is _W.COMMITTED
     assert _counts(world.database) == (1, 1)
     _check_database(world.database)
 
@@ -729,20 +757,20 @@ def test_w_x_z_a_commit_failure_is_unconfirmed_never_a_rollback_claim(
     behaviour,
     durable: int,  # type: ignore[no-untyped-def]
 ) -> None:
-    disposition, attempt = records(world.proposed())
+    authorization = world.authorize(world.proposed())
     _commit_once(monkeypatch, behaviour)
     with pytest.raises(EquityRecommendationGenerationCommitUnconfirmedError) as raised:
-        world.store().record_generation(disposition, attempt)
+        world.store().write_generation(authorization)
     assert not isinstance(
         raised.value,
         EquityRecommendationGenerationNotCommittedError
         | EquityRecommendationGenerationStoreUnavailableError,
     )
     assert _counts(world.database) == (durable, durable)
-    only = equity_recommendation_attempt(world.attempt_only())
+    only = world.authorize(world.attempt_only())
     _commit_once(monkeypatch, behaviour)
     with pytest.raises(EquityRecommendationGenerationCommitUnconfirmedError):
-        world.store().record_attempt(only)
+        world.store().write_attempt(only)
     assert _counts(world.database) == (durable, 2 * durable)
 
 
@@ -786,12 +814,13 @@ class _CompetitorBeforeReload(SQLiteEquityRecommendationGenerationStore):
 def test_y_a_reload_that_finds_a_competitors_content_is_a_conflict(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    unresolved, unresolved_attempt = records(world.unresolved())
+    unresolved, _ = records(world.unresolved())
+    competing = world.authorize(world.unresolved())  # the competitor's own verified write
 
     def competitor() -> None:  # an independent adapter, its own connection
         assert (
             SQLiteEquityRecommendationGenerationStore(world.database)
-            .record_generation(unresolved, unresolved_attempt)
+            .write_generation(competing)
             .outcome
             is _W.COMMITTED
         )
@@ -850,19 +879,23 @@ def test_z_attempt_only_writes_reconcile_by_attempt_identity(
 
 
 class _Paused(SQLiteEquityRecommendationGenerationStore):
-    """Pauses its first write after the Application verified it, before any transaction."""
+    """Pauses its first write after the Application verified it, before any transaction.
+
+    It overrides the authorized entry (EI4-D11-W2-I) only to pause, then calls
+    the real ``write_generation``, so the authorization is still validated.
+    """
 
     def __init__(self, database: Path) -> None:
         super().__init__(database)
         self.arrived, self.go = threading.Event(), threading.Event()
         self.calls = 0
 
-    def record_generation(self, disposition, attempt):  # type: ignore[no-untyped-def]
+    def write_generation(self, authorization):  # type: ignore[no-untyped-def]
         self.calls += 1
         if self.calls == 1:
             self.arrived.set()
             assert self.go.wait(timeout=30), "the test never resumed the writer"
-        return super().record_generation(disposition, attempt)
+        return super().write_generation(authorization)
 
 
 def _race(world: World, loser: Callable[[], Any], winner: Callable[[], Any]) -> Any:
@@ -915,14 +948,15 @@ def test_ab_the_first_committed_content_wins_and_the_loser_is_audited(world: Wor
 def test_ac_a_writer_without_the_lock_fails_without_writing(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    disposition, attempt = records(world.proposed())
+    disposition, _ = records(world.proposed())
     world.store().load_disposition(disposition.generation_key)  # creates the schema
+    authorization = world.authorize(world.proposed())
     monkeypatch.setattr(adapter_module, "_BUSY_TIMEOUT_SECONDS", 0.05)
     holder = raw(world.database)
     try:
         holder.execute("BEGIN IMMEDIATE")
         with pytest.raises(EquityRecommendationGenerationNotCommittedError, match="locked"):
-            world.store().record_generation(disposition, attempt)
+            world.store().write_generation(authorization)
         result = world.recorder().execute(world.proposed())
         assert result.outcome is _O.NOT_COMMITTED and result.attempt_recorded is False
     finally:
@@ -934,7 +968,8 @@ def test_ac_a_writer_without_the_lock_fails_without_writing(
 def test_ac_a_competing_writer_waits_for_the_lock_and_sees_the_commit(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    disposition, attempt = records(world.proposed())
+    disposition, _ = records(world.proposed())
+    authorization = world.authorize(world.proposed())  # one verified write, by two writers
     holding, release = threading.Event(), threading.Event()
     real = adapter_module._insert_attempt
     results: dict[str, EquityRecommendationStoreWrite] = {}
@@ -948,8 +983,8 @@ def test_ac_a_competing_writer_waits_for_the_lock_and_sees_the_commit(
     monkeypatch.setattr(adapter_module, "_insert_attempt", insert)
 
     def write(name: str) -> None:
-        results[name] = SQLiteEquityRecommendationGenerationStore(world.database).record_generation(
-            disposition, attempt
+        results[name] = SQLiteEquityRecommendationGenerationStore(world.database).write_generation(
+            authorization
         )
 
     holder = threading.Thread(target=write, args=("holder",), name="holder")
@@ -1174,7 +1209,7 @@ def test_ai_a_tampered_attempt_fails_closed(world: World) -> None:
     with pytest.raises(InvalidEquityRecommendationRecordError):
         world.store().load_attempt(attempt.attempt_identity)
     with pytest.raises(InvalidEquityRecommendationRecordError):
-        world.store().record_attempt(attempt)
+        world.store().write_attempt(world.authorize_attempt(attempt))
     # The EI-4D-A recorder maps it: invalid, not stored, recording state unknown.
     result = world.recorder().execute(world.attempt_only())
     assert result.outcome is _O.STORED_RECORD_INVALID
@@ -1217,7 +1252,7 @@ def test_aj_a_disposition_must_rest_on_its_own_synthetic_candidate(
 
 def test_aj_an_attempt_must_share_the_scope_of_the_disposition_under_its_key(world: World) -> None:
     proposed, attempt = records(world.proposed())
-    world.store().record_generation(proposed, attempt)
+    world.store().write_generation(world.authorize(world.proposed()))
     row = list(adapter_module.attempt_row(attempt))
     document = json.loads(attempt.attempt_document)
     document["request"]["policy_set"]["version"] = "synthetic-ei4db-set/other"

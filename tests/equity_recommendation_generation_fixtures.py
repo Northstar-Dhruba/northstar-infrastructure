@@ -16,6 +16,7 @@ import dataclasses
 from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from northstar_application.application_services import (
     NSE_EQUITY_INTRADAY_V1_RESEARCH_WINDOW,
@@ -74,6 +75,7 @@ from tests.equity_intraday_research_timeline_fixtures import (
     Harness,
     ist,
 )
+from tests.equity_recommendation_write_authorization_fixtures import capture_authorization
 
 DISPOSITIONS = "equity_recommendation_generation_dispositions"
 ATTEMPTS = "equity_recommendation_generation_attempts"
@@ -340,6 +342,28 @@ class World:
     ) -> RecordEquityRecommendationGenerationUseCase:
         return RecordEquityRecommendationGenerationUseCase(
             store or self.store(), self.verifier(), self.catalog(), max_writes
+        )
+
+    # -- genuine authorizations, issued by the real verified recorder (EI4-D11) --
+
+    def authorize(self, audit: EquityRecommendationEligibilityAudit) -> Any:
+        """The recorder's authorization for ``audit``'s write; nothing is written."""
+        return capture_authorization(self.recorder, self.database, lambda r: r.execute(audit))
+
+    def authorize_records(
+        self,
+        disposition: EquityRecommendationGenerationDisposition,
+        attempt: EquityRecommendationGenerationAttempt,
+    ) -> Any:
+        """The recorder's authorization for exactly these records, after verification."""
+        return capture_authorization(
+            self.recorder, self.database, lambda r: r.record(disposition, attempt)
+        )
+
+    def authorize_attempt(self, attempt: EquityRecommendationGenerationAttempt) -> Any:
+        """The recorder's authorization for exactly this attempt-only result."""
+        return capture_authorization(
+            self.recorder, self.database, lambda r: r.record_attempt(attempt)
         )
 
 

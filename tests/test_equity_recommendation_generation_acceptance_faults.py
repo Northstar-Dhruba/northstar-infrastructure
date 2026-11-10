@@ -55,6 +55,7 @@ from northstar_application.application_services import (
 from northstar_application.ports import (
     EquityRecommendationGenerationNotCommittedError,
     EquityRecommendationStoreOutcome,
+    UnverifiedEquityRecommendationGenerationWriteError,
 )
 from northstar_core.foundation.value_objects import Price
 
@@ -82,6 +83,7 @@ from tests.equity_recommendation_acceptance_fixtures import (
     rows,
     schema_objects,
 )
+from tests.equity_recommendation_write_authorization_fixtures import plant_generation_records
 
 _O = EquityRecommendationRecordingOutcome
 _S = EquityRecommendationGenerationStatus
@@ -264,9 +266,9 @@ def test_e17_a_real_constraint_violation_rolls_back_the_whole_write(
         real(connection, tuple(bad))
 
     monkeypatch.setattr(adapter_module, "_insert_attempt", violating)
-    disposition, attempt = _records(_proposed(pipeline))
+    authorization = pipeline.authorize(_proposed(pipeline))  # issued by the verified recorder
     with pytest.raises(EquityRecommendationGenerationNotCommittedError) as raised:
-        pipeline.store().record_generation(disposition, attempt)
+        pipeline.store().write_generation(authorization)
     assert isinstance(raised.value.__cause__, sqlite3.IntegrityError)  # the database refused
     assert counts(pipeline.database) == (0, 0)  # the inserted disposition was rolled back
 
@@ -350,10 +352,10 @@ class _CompetitorBeforeReload(SQLiteEquityRecommendationGenerationStore):
         return super().load_disposition(generation_key)
 
 
-def _competitor(pipeline: Pipeline, records: _Records) -> Callable[[], None]:
-    def commit() -> None:  # an independent adapter and connection
-        written = SQLiteEquityRecommendationGenerationStore(pipeline.database).record_generation(
-            *records
+def _competitor(pipeline: Pipeline, authorization: Any) -> Callable[[], None]:
+    def commit() -> None:  # an independent adapter and connection, its own verified write
+        written = SQLiteEquityRecommendationGenerationStore(pipeline.database).write_generation(
+            authorization
         )
         assert written.outcome is _W.COMMITTED
 
@@ -384,8 +386,10 @@ def test_e18_another_writers_commit_found_on_reload_is_equivalent_or_a_conflict(
     pipeline: Pipeline, research: Research, monkeypatch: pytest.MonkeyPatch, competing: str
 ) -> None:
     proposed = _proposed(pipeline)
-    theirs = _records(proposed if competing == "equivalent" else _unresolved(pipeline))
-    store = _CompetitorBeforeReload(pipeline.database, _competitor(pipeline, theirs))
+    their_audit = proposed if competing == "equivalent" else _unresolved(pipeline)
+    theirs = _records(their_audit)
+    competing_write = pipeline.authorize(their_audit)
+    store = _CompetitorBeforeReload(pipeline.database, _competitor(pipeline, competing_write))
     _commit_once(monkeypatch, _not_committed)
     result = pipeline.recorder(store).execute(proposed)
     assert result.reconciled and result.writes == 1
@@ -787,7 +791,7 @@ def _forged(audit: EquityRecommendationEligibilityAudit, **candidate: object) ->
     return _records(forged)
 
 
-@pytest.mark.parametrize(
+_CONTRADICTIONS = pytest.mark.parametrize(
     "field_value",
     [
         ("signal_close", Price(Decimal("253.55"), INR)),
@@ -795,6 +799,42 @@ def _forged(audit: EquityRecommendationEligibilityAudit, **candidate: object) ->
     ],
     ids=["signal close", "opening-range low"],
 )
+
+
+@_CONTRADICTIONS
+def test_e20_an_unauthorized_adapter_write_of_contradictory_evidence_is_refused(
+    pipeline: Pipeline,
+    research: Research,
+    field_value: tuple[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # EI4-D11 (ADR-023), guarantee 1: the direct adapter write that EI-4E's AA-2
+    # found committing this forgery is refused before SQLite is opened.
+    audit = _proposed(pipeline)
+    name, value = field_value
+    forged, forged_attempt = _forged(audit, **{name: value})
+    pipeline.store().load_disposition(forged.generation_key)  # creates the schema
+    before = (rows(pipeline.database, DISPOSITIONS), rows(pipeline.database, ATTEMPTS))
+    opened: list[object] = []
+    real_connect = adapter_module._connect  # noqa: SLF001
+
+    def connect(database_path: Path) -> sqlite3.Connection:
+        opened.append(database_path)
+        return real_connect(database_path)
+
+    monkeypatch.setattr(adapter_module, "_connect", connect)
+    with pytest.raises(UnverifiedEquityRecommendationGenerationWriteError):
+        pipeline.store().record_generation(forged, forged_attempt)
+    # Nor can the forgery obtain an authorization: the recorder refuses it.
+    refused = pipeline.recorder().record(forged, forged_attempt)
+    assert refused.outcome is _O.SOURCE_EVIDENCE_INVALID and refused.writes == 0
+    assert opened == []  # no connection was ever opened to write it
+    monkeypatch.setattr(adapter_module, "_connect", real_connect)
+    assert (rows(pipeline.database, DISPOSITIONS), rows(pipeline.database, ATTEMPTS)) == before
+    assert counts(pipeline.database) == (0, 0)
+
+
+@_CONTRADICTIONS
 def test_e20_contradictory_candidate_evidence_is_caught_by_the_application_verifier(
     pipeline: Pipeline, research: Research, field_value: tuple[str, object]
 ) -> None:
@@ -808,10 +848,12 @@ def test_e20_contradictory_candidate_evidence_is_caught_by_the_application_verif
     refused = pipeline.recorder().record(forged, forged_attempt)
     assert refused.outcome is _O.SOURCE_EVIDENCE_INVALID and refused.writes == 0
     assert counts(pipeline.database) == (0, 0)  # refused before any write
-    # The adapter is a persistence adapter: every structural reference matches, so
-    # SQLite accepts it. Verification on reload is the Application's (EI4-D9-I).
-    written = pipeline.store().record_generation(forged, forged_attempt)
-    assert written.outcome is _W.COMMITTED
+    # EI4-D11-W2-I: the adapter no longer accepts it (see the test above). This test
+    # keeps EI-4E's AA-2 consequence: such evidence, once committed -- here planted
+    # by TEST-ONLY LEGACY-EVIDENCE SETUP, standing for a write before enforcement or
+    # by privileged access -- still fails closed. Every structural reference matches,
+    # so SQLite accepts the rows; verification on reload is the Application's.
+    plant_generation_records(pipeline.database, forged, forged_attempt)
     with pytest.raises(EquityRecommendationSourceVerificationError, match=name):
         pipeline.verify_stored().execute(forged.generation_key)
     forged_rows = rows(pipeline.database, DISPOSITIONS)
@@ -866,8 +908,8 @@ def test_e21_a_corrupt_stored_attempt_is_typed_by_the_adapter_and_mapped_by_the_
         pipeline.store().load_attempt(attempt.attempt_identity)
     if error is InvalidEquityRecommendationRecordError:
         assert not isinstance(raised.value, IncompatibleEquityRecommendationRecordError)
-    with pytest.raises(error):
-        pipeline.store().record_attempt(attempt)
+    with pytest.raises(error):  # through the authorized path: the stored row still fails
+        pipeline.store().write_attempt(pipeline.authorize(_attempt_only(pipeline)))
     # The Application recorder maps it: not stored, and the attempt's state is unknown.
     result = pipeline.recorder().execute(_attempt_only(pipeline))
     assert result.outcome is outcome
