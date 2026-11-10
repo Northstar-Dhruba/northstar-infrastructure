@@ -29,7 +29,6 @@ import pytest
 from northstar_application.application_services import (
     EquityRecommendationGenerationDisposition,
     EquityRecommendationRecordingOutcome,
-    equity_recommendation_attempt,
 )
 from northstar_application.ports import (
     EquityRecommendationGenerationCommitUnconfirmedError,
@@ -99,8 +98,8 @@ def _no_programming_error(error: BaseException) -> None:
 
 def _seed(world: World) -> dict[str, list[tuple[object, ...]]]:
     """Commit an unrelated generation (another key) so pre-existing rows can be compared."""
-    disposition, attempt = records(world.not_eligible())
-    assert world.store().record_generation(disposition, attempt).outcome is _W.COMMITTED
+    authorization = world.authorize(world.not_eligible())
+    assert world.store().write_generation(authorization).outcome is _W.COMMITTED
     return _rows(world.database)
 
 
@@ -135,16 +134,16 @@ def _connection_lost_after_commit(real: _Commit, connection: sqlite3.Connection)
 
 
 def _generation(world: World) -> Callable[[SQLiteEquityRecommendationGenerationStore], Any]:
-    disposition, attempt = records(world.proposed())
-    return lambda store: store.record_generation(disposition, attempt)
+    authorization = world.authorize(world.proposed())  # issued by the real verified recorder
+    return lambda store: store.write_generation(authorization)
 
 
 def _attempt(world: World) -> Callable[[SQLiteEquityRecommendationGenerationStore], Any]:
-    only = equity_recommendation_attempt(world.attempt_only())
-    return lambda store: store.record_attempt(only)
+    authorization = world.authorize(world.attempt_only())
+    return lambda store: store.write_attempt(authorization)
 
 
-_OPERATIONS = {"record_generation": (_generation, (1, 1)), "record_attempt": (_attempt, (0, 1))}
+_OPERATIONS = {"write_generation": (_generation, (1, 1)), "write_attempt": (_attempt, (0, 1))}
 
 
 # ----------------------------------------------------------------------
@@ -274,9 +273,10 @@ def test_w2_b_the_committed_records_are_exactly_the_offered_ones(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     disposition, attempt = records(world.proposed())
+    authorization = world.authorize(world.proposed())
     _commits(monkeypatch, _connection_lost_after_commit)
     with pytest.raises(EquityRecommendationGenerationCommitUnconfirmedError):
-        world.store().record_generation(disposition, attempt)
+        world.store().write_generation(authorization)
     fresh = SQLiteEquityRecommendationGenerationStore(world.database)
     assert fresh.load_disposition(disposition.generation_key) == disposition
     assert fresh.load_attempt(attempt.attempt_identity) == attempt
@@ -337,11 +337,12 @@ class _CompetitorBeforeReload(SQLiteEquityRecommendationGenerationStore):
 def test_w2_j_a_competitor_found_on_reload_is_a_conflict_and_never_overwritten(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    unresolved, unresolved_attempt = records(world.unresolved())
+    unresolved, _ = records(world.unresolved())
+    competing = world.authorize(world.unresolved())  # the competitor's own verified write
 
     def competitor() -> None:
-        written = SQLiteEquityRecommendationGenerationStore(world.database).record_generation(
-            unresolved, unresolved_attempt
+        written = SQLiteEquityRecommendationGenerationStore(world.database).write_generation(
+            competing
         )
         assert written.outcome is _W.COMMITTED
 
@@ -419,10 +420,11 @@ def test_w2_g_a_close_failure_after_a_confirmed_commit_is_not_suppressed(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unchanged behaviour: after a confirmed COMMIT a close failure is reported as itself."""
-    disposition, attempt = records(world.proposed())
+    disposition, _ = records(world.proposed())
+    authorization = world.authorize(world.proposed())
     _failing_close(monkeypatch)
     with pytest.raises(sqlite3.OperationalError, match="close failed"):
-        world.store().record_generation(disposition, attempt)
+        world.store().write_generation(authorization)
     fresh = SQLiteEquityRecommendationGenerationStore(world.database)
     assert fresh.load_disposition(disposition.generation_key) == disposition
     assert _counts(world.database) == (1, 1)
@@ -441,28 +443,28 @@ def test_w2_g_every_write_path_closes_its_connection(
         return connection
 
     monkeypatch.setattr(adapter_module, "_connect", connect)
-    disposition, attempt = records(world.proposed())
-    unresolved, unresolved_attempt = records(world.unresolved())
-    only = equity_recommendation_attempt(world.attempt_only())
+    proposed = world.authorize(world.proposed())  # authorizing opens no adapter connection
+    unresolved = world.authorize(world.unresolved())
+    only = world.authorize(world.attempt_only())
     store = world.store()
-    assert store.record_generation(disposition, attempt).outcome is _W.COMMITTED
-    assert store.record_generation(disposition, attempt).outcome is _W.EQUIVALENT
-    assert store.record_generation(unresolved, unresolved_attempt).outcome is _W.CONFLICT
-    assert store.record_attempt(only).outcome is _W.COMMITTED
+    assert store.write_generation(proposed).outcome is _W.COMMITTED
+    assert store.write_generation(proposed).outcome is _W.EQUIVALENT
+    assert store.write_generation(unresolved).outcome is _W.CONFLICT
+    assert store.write_attempt(only).outcome is _W.COMMITTED
 
     def refuse(connection: sqlite3.Connection, values: tuple[object, ...]) -> None:
         raise sqlite3.OperationalError("test: refused before COMMIT")
 
-    other, other_attempt = records(world.not_eligible())
+    other = world.authorize(world.not_eligible())
     with monkeypatch.context() as patch:
         patch.setattr(adapter_module, "_insert_attempt", refuse)
         with pytest.raises(EquityRecommendationGenerationNotCommittedError):
-            store.record_generation(other, other_attempt)
+            store.write_generation(other)
     for behaviour in (_connection_lost_before_commit, _connection_lost_after_commit):
         with monkeypatch.context() as patch:
             _commits(patch, behaviour)
             with pytest.raises(EquityRecommendationGenerationCommitUnconfirmedError):
-                store.record_generation(other, other_attempt)
+                store.write_generation(other)
     assert len(opened) == 7
     for connection in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):

@@ -118,6 +118,7 @@ from northstar_infrastructure.persistence import (
     initialize_equity_candle_evidence_schema,
     initialize_equity_intraday_research_timeline_schema,
 )
+from tests.equity_recommendation_write_authorization_fixtures import capture_authorization
 
 # ---------------------------------------------------------------------------
 # The synthetic session (SYNTHETIC TEST DATA)
@@ -580,6 +581,10 @@ class Pipeline:
         return RecordEquityRecommendationGenerationUseCase(
             store or self.store(), self.verifier(), catalog or self.catalog(), max_writes
         )
+
+    def authorize(self, audit: EquityRecommendationEligibilityAudit) -> Any:
+        """The verified recorder's authorization for ``audit``'s write (EI4-D11); none written."""
+        return capture_authorization(self.recorder, self.database, lambda r: r.execute(audit))
 
     def verify_stored(self) -> VerifyStoredEquityRecommendationGenerationUseCase:
         return VerifyStoredEquityRecommendationGenerationUseCase(self.store(), self.verifier())
