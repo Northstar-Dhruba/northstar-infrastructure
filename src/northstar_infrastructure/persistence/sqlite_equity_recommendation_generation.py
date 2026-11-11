@@ -39,11 +39,12 @@ by the verified Application recorder, or whose content changed raises
 UnverifiedEquityRecommendationGenerationWriteError **before any connection
 opens**. The records are then rebuilt from their validated immutable
 canonical fields, so every column comes from a document only this adapter
-holds. The public ``record_generation`` and ``record_attempt`` remain only
-because the transitional Application port declares them; they refuse with
-the same error, before any connection. Neither is an operational interface
-(EI4-D11-A). This stops ordinary unsupported writes; it does not stop direct
-SQL or privileged code (ADR-022 DQ9, EI4D11-DQ1).
+holds. There is no other public write: the raw ``record_generation`` and
+``record_attempt`` were removed from the Application port (EI4-D11-W3) and
+from this adapter (EI4-D11-W4-I), and the private persistence helpers are
+reached only through the two authorized entries. This stops ordinary
+unsupported writes; it does not stop direct SQL, file access or privileged
+code (ADR-022 DQ9, EI4D11-DQ1).
 
 Writes
 ------
@@ -61,7 +62,7 @@ serializes writers (EI4-D9-E, EI4-D9-F). For a generation write:
    then hold the same attempt;
 6. the transaction commits once.
 
-``record_attempt`` inserts an attempt-only result unless already stored; it
+``write_attempt`` inserts an attempt-only result unless already stored; it
 never creates a disposition. The schema's constraints and triggers check
 every inserted row again; uniqueness is the database's, not this module's.
 
@@ -111,7 +112,6 @@ from northstar_application.ports import (
     EquityRecommendationGenerationStoreUnavailableError,
     EquityRecommendationStoreOutcome,
     EquityRecommendationStoreWrite,
-    UnverifiedEquityRecommendationGenerationWriteError,
 )
 
 from northstar_infrastructure.persistence.sqlite_equity_candle_evidence_schema import (
@@ -390,14 +390,6 @@ def _discard(connection: sqlite3.Connection) -> None:
         pass
 
 
-def _refuse_raw(method: str, authorized: str) -> NoReturn:
-    raise UnverifiedEquityRecommendationGenerationWriteError(
-        f"{method} is not an authorized write path (EI4-D11, ADR-023); nothing was written. "
-        f"Generation records are written only through {authorized} with an authorization "
-        "issued by the verified Application recorder."
-    )
-
-
 def _generation_snapshot(
     disposition: EquityRecommendationGenerationDisposition,
     attempt: EquityRecommendationGenerationAttempt,
@@ -509,26 +501,6 @@ class SQLiteEquityRecommendationGenerationStore(EquityRecommendationGenerationSt
         """
         verified = require_verified_equity_recommendation_attempt_write(authorization)
         return self._record_attempt(_attempt_snapshot(verified.attempt))
-
-    # -- legacy raw writes: refused (EI4-D11-W2-I; removed in W4-I) ------------
-
-    def record_generation(
-        self,
-        disposition: EquityRecommendationGenerationDisposition,
-        attempt: EquityRecommendationGenerationAttempt,
-    ) -> EquityRecommendationStoreWrite:
-        """Refused: not an authorized write path. Use ``write_generation``.
-
-        It stays only because the transitional Application port still declares
-        it (removed in W3 and W4-I). It refuses before any connection opens.
-        """
-        _refuse_raw("record_generation", "write_generation")
-
-    def record_attempt(
-        self, attempt: EquityRecommendationGenerationAttempt
-    ) -> EquityRecommendationStoreWrite:
-        """Refused: not an authorized write path. Use ``write_attempt``."""
-        _refuse_raw("record_attempt", "write_attempt")
 
     # -- the one write implementation, reached only through authorization ----
 

@@ -809,11 +809,17 @@ def test_e20_an_unauthorized_adapter_write_of_contradictory_evidence_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # EI4-D11 (ADR-023), guarantee 1: the direct adapter write that EI-4E's AA-2
-    # found committing this forgery is refused before SQLite is opened.
+    # found committing this forgery no longer exists (W4-I removed the raw
+    # ``record_generation``), and the only write entry refuses it before SQLite opens.
     audit = _proposed(pipeline)
     name, value = field_value
     forged, forged_attempt = _forged(audit, **{name: value})
     pipeline.store().load_disposition(forged.generation_key)  # creates the schema
+    # A genuine authorization, issued by the real recorder for the genuine record ...
+    genuine = pipeline.authorize(audit)
+    # ... then, TEST-ONLY privileged tampering (outside the trust boundary), made
+    # to carry the forgery's content under the same generation key.
+    object.__setattr__(genuine.disposition, "assessment_document", forged.assessment_document)
     before = (rows(pipeline.database, DISPOSITIONS), rows(pipeline.database, ATTEMPTS))
     opened: list[object] = []
     real_connect = adapter_module._connect  # noqa: SLF001
@@ -823,12 +829,15 @@ def test_e20_an_unauthorized_adapter_write_of_contradictory_evidence_is_refused(
         return real_connect(database_path)
 
     monkeypatch.setattr(adapter_module, "_connect", connect)
-    with pytest.raises(UnverifiedEquityRecommendationGenerationWriteError):
-        pipeline.store().record_generation(forged, forged_attempt)
+    store = pipeline.store()
+    assert not hasattr(store, "record_generation") and not hasattr(store, "record_attempt")
+    for offered in ((forged, forged_attempt), forged, genuine):
+        with pytest.raises(UnverifiedEquityRecommendationGenerationWriteError):
+            store.write_generation(offered)  # type: ignore[arg-type]
+    assert opened == []  # no connection was ever opened to write it
     # Nor can the forgery obtain an authorization: the recorder refuses it.
     refused = pipeline.recorder().record(forged, forged_attempt)
     assert refused.outcome is _O.SOURCE_EVIDENCE_INVALID and refused.writes == 0
-    assert opened == []  # no connection was ever opened to write it
     monkeypatch.setattr(adapter_module, "_connect", real_connect)
     assert (rows(pipeline.database, DISPOSITIONS), rows(pipeline.database, ATTEMPTS)) == before
     assert counts(pipeline.database) == (0, 0)

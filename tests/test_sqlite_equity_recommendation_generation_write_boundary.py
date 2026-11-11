@@ -1,4 +1,4 @@
-"""EI4-D11-W2-I: the SQLite generation adapter accepts only authorized writes (ADR-023).
+"""EI4-D11-W2-I and W4-I: the SQLite generation adapter accepts only authorized writes (ADR-023).
 
 Tests of the enforced Infrastructure boundary, on real temporary SQLite files:
 
@@ -7,7 +7,9 @@ Tests of the enforced Infrastructure boundary, on real temporary SQLite files:
   authorization is refused with UnverifiedEquityRecommendationGenerationWriteError
   before ``_connect`` -- the adapter's real connection seam, counted here -- is
   ever called;
-- the legacy ``record_generation`` and ``record_attempt`` refuse the same way;
+- the legacy ``record_generation`` and ``record_attempt`` no longer exist
+  (W4-I), and the raw records they took are refused the same way when offered
+  to the authorized entries;
 - an authorized write persists exactly the validated canonical content, even
   when the caller's decoded document is mutated after validation;
 - the existing transaction, conflict, reconciliation and replay behaviour holds.
@@ -218,18 +220,27 @@ def test_changed_nested_assessment_attempt_or_policy_identity_is_refused(
         world.store().write_attempt(attempt)
 
 
-def test_the_legacy_raw_writes_refuse_before_sqlite(world: World, connections: list[Path]) -> None:
+def test_the_legacy_raw_writes_are_gone_and_raw_records_are_refused_before_sqlite(
+    world: World, connections: list[Path]
+) -> None:
+    # EI4-D11-W4-I: the raw entries no longer exist, on the class or an instance;
+    # the records they took are refused when offered to the only write entries.
     _schema(world)
     disposition, attempt = records(world.proposed())
     only = equity_recommendation_attempt(world.attempt_only())
     store = world.store()
-    with _refused_before_sqlite(world, connections):  # cases 15, 17, 18, 19
-        store.record_generation(disposition, attempt)
-    with _refused_before_sqlite(world, connections):  # case 16
-        store.record_attempt(only)
-    with _refused_before_sqlite(world, connections):  # not even with a valid authorization's parts
-        authorization = world.authorize(world.proposed())
-        store.record_generation(authorization.disposition, authorization.attempt)
+    for name in ("record_generation", "record_attempt"):
+        assert not hasattr(type(store), name) and not hasattr(store, name), name
+    for raw_records in ((disposition, attempt), disposition, attempt, only):
+        with _refused_before_sqlite(world, connections):
+            store.write_generation(raw_records)  # type: ignore[arg-type]
+    for raw_records in (only, attempt, (disposition, attempt)):
+        with _refused_before_sqlite(world, connections):
+            store.write_attempt(raw_records)  # type: ignore[arg-type]
+    authorization = world.authorize(world.proposed())  # not even a valid authorization's parts
+    for parts in ((authorization.disposition, authorization.attempt), authorization.verified):
+        with _refused_before_sqlite(world, connections):
+            store.write_generation(parts)  # type: ignore[arg-type]
     assert count(world.database, DISPOSITIONS) == count(world.database, ATTEMPTS) == 0
 
 
@@ -358,10 +369,12 @@ def test_the_synthetic_chain_writes_only_through_the_enforced_boundary(
     assert pipeline.recorder().execute(audit).outcome is _O.COMMITTED
     (row,) = acceptance_rows(pipeline.database, "equity_recommendation_generation_dispositions")
     assert row["assessment_document"] == disposition.assessment_document
-    # A raw direct adapter write is refused.
+    # There is no raw adapter write (W4-I); raw records offered to the
+    # authorized entry are refused.
     other = equity_recommendation_attempt(audit)
+    assert not hasattr(pipeline.store(), "record_generation")
     with pytest.raises(_Unverified):
-        pipeline.store().record_generation(disposition, other)
+        pipeline.store().write_generation((disposition, other))  # type: ignore[arg-type]
     # Restart: the file is renamed (Windows refuses while any connection is open).
     moved = tmp_path / "after-restart.sqlite3"
     pipeline.database.rename(moved)

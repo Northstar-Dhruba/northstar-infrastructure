@@ -206,14 +206,17 @@ def _with_document(
 # ----------------------------------------------------------------------
 
 
-def test_a_the_adapter_implements_the_merged_application_port() -> None:
-    # EI4-D11-W2-I: written to hold both now and after W3 removes the raw write
-    # signatures from the Application port (EI4-D11 design, section 22.4).
+def test_a_the_adapter_implements_the_merged_application_port(tmp_path: Path) -> None:
+    # EI4-D11-W4-I: the final interface. The Application port (W3) requires exactly
+    # the two reads and the two authorized writes; the adapter adds no other public
+    # method -- in particular no raw ``record_generation`` or ``record_attempt``.
     adapter = SQLiteEquityRecommendationGenerationStore
     assert issubclass(adapter, EquityRecommendationGenerationRecordReader)
     assert issubclass(adapter, EquityRecommendationGenerationRecordWriter)
     assert issubclass(adapter, EquityRecommendationGenerationStore)
     assert not getattr(adapter, "__abstractmethods__", None)
+    required = {"load_disposition", "load_attempt", "write_generation", "write_attempt"}
+    assert EquityRecommendationGenerationStore.__abstractmethods__ == required
     for port, names in (
         (EquityRecommendationGenerationRecordReader, ("load_disposition", "load_attempt")),
         (EquityRecommendationGenerationRecordWriter, ("write_generation", "write_attempt")),
@@ -224,10 +227,12 @@ def test_a_the_adapter_implements_the_merged_application_port() -> None:
             theirs = inspect.signature(getattr(port, name))
             assert list(ours.parameters) == list(theirs.parameters), name
             assert name in vars(adapter), f"{name} is the adapter's own, not a port default"
-    public = {n for n in vars(adapter) if not n.startswith("_")}
-    required = {"load_disposition", "load_attempt", "write_generation", "write_attempt"}
-    transitional = {"record_generation", "record_attempt"}  # refusing until W4-I removes them
-    assert required <= public <= required | transitional
+    public = {n for n in dir(adapter) if not n.startswith("_")}
+    assert public == required
+    store = adapter(tmp_path / "unused.sqlite3")  # instantiable; nothing opened or created
+    for name in ("record_generation", "record_attempt"):
+        assert not hasattr(adapter, name) and not hasattr(store, name), name
+    assert not (tmp_path / "unused.sqlite3").exists()
 
 
 def test_b_a_new_evidence_database_acquires_the_generation_schema(tmp_path: Path) -> None:
@@ -544,11 +549,13 @@ def test_l_an_attempt_only_result_never_needs_or_creates_a_disposition(world: Wo
     stored = world.store().write_attempt(world.authorize_attempt(attempt))
     assert (stored.outcome, stored.stored, stored.attempt_inserted) == (_W.EQUIVALENT, None, False)
     _, keyed = records(world.proposed())
-    # A keyed attempt is never authorized as attempt-only, and never written raw.
+    # A keyed attempt is never authorized as attempt-only, and there is no raw
+    # write (EI4-D11-W4-I): offered to the authorized entry itself, it is refused.
     with pytest.raises(ValueError, match="recorded with it"):
         world.recorder().record_attempt(keyed)
+    assert not hasattr(world.store(), "record_attempt")
     with pytest.raises(UnverifiedEquityRecommendationGenerationWriteError):
-        world.store().record_attempt(keyed)
+        world.store().write_attempt(keyed)
     assert _counts(world.database) == (0, 1)
 
 
@@ -557,8 +564,9 @@ def test_s_a_disposition_is_recorded_only_with_its_own_attempt(world: World) -> 
     _, other = records(world.not_eligible())
     with pytest.raises(ValueError, match="not the attempt of this disposition"):
         world.recorder().record(proposed, other)
+    assert not hasattr(world.store(), "record_generation")
     with pytest.raises(UnverifiedEquityRecommendationGenerationWriteError):
-        world.store().record_generation(proposed, other)
+        world.store().write_generation((proposed, other))
     _with_schema(world)
     assert _counts(world.database) == (0, 0)
 
