@@ -53,6 +53,12 @@ rolled back before COMMIT: nothing was written. A failure from COMMIT itself
 raises EquityIntradayResearchTimelineCommitUnconfirmedError and asserts
 nothing: SQLite may or may not have made the transaction durable, and the
 Application reconciles against reloaded history. The store never retries.
+
+Cleanup -- rolling back or closing a connection that may already have failed
+-- never replaces the outcome being reported and is never taken as evidence
+that a transaction was rolled back (L9-T, as W2 for the EI-4D-B store). After
+a confirmed COMMIT the connection is closed normally, and a failure to close
+it is reported as itself, never as an unconfirmed commit.
 """
 
 from __future__ import annotations
@@ -346,12 +352,31 @@ def _insert_entry(connection: sqlite3.Connection, values: tuple[object, ...]) ->
     connection.execute(_INSERT_ENTRY, values)
 
 
+def _close(connection: sqlite3.Connection) -> None:
+    connection.close()
+
+
 def _rollback(connection: sqlite3.Connection) -> None:
-    if connection.in_transaction:
-        try:
+    """Roll back an open transaction; never mask the failure that led here.
+
+    A connection that already failed or closed -- for example around COMMIT --
+    cannot even report whether a transaction is open, so nothing is asserted
+    about it: a transaction that never reached COMMIT ends rolled back when its
+    connection closes, and one whose COMMIT failed stays unconfirmed.
+    """
+    try:
+        if connection.in_transaction:
             connection.rollback()
-        except sqlite3.Error:
-            pass  # Closing the connection rolls the transaction back.
+    except sqlite3.Error:
+        pass
+
+
+def _discard(connection: sqlite3.Connection) -> None:
+    """Close a connection as a failure propagates; a close failure never replaces it."""
+    try:
+        _close(connection)
+    except sqlite3.Error:
+        pass
 
 
 def _verified[T](work: Callable[[], T], subject: str) -> T:
@@ -461,8 +486,10 @@ class SQLiteEquityIntradayResearchTimelineStore(EquityIntradayResearchTimelineSt
                     "COMMIT failed; whether the research timeline entries are durable is "
                     f"unknown: {exc}"
                 ) from exc
-        finally:
-            connection.close()
+        except BaseException:
+            _discard(connection)
+            raise
+        _close(connection)
 
     @staticmethod
     def _compare_and_insert(
