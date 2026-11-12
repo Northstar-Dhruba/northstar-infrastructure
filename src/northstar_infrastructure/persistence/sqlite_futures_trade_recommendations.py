@@ -65,6 +65,12 @@ holds. A writer waits at most five seconds for that lock; past it the write
 fails as a storage error and nothing is written. The journal mode is left as
 it is. Foreign keys are enforced on this module's own write connections.
 
+Cleanup -- rolling back or closing a connection that may already have failed
+-- never replaces the outcome being reported, on either write path (L9-F, as
+W2 for the EI-4D-B store). A COMMIT failure is still the storage error. After
+a confirmed COMMIT the connection is closed normally, and a failure to close
+it is reported as itself.
+
 Lifecycle progress
 ------------------
 ``record_progress(previous, current, steps=...)`` first runs the shared
@@ -594,26 +600,59 @@ def _stored_audit(
         ) from exc
 
 
+def _close(connection: sqlite3.Connection) -> None:
+    connection.close()
+
+
+def _rollback(connection: sqlite3.Connection) -> None:
+    """Roll back an open transaction; never mask the failure that led here.
+
+    A connection that already failed or closed cannot even report whether a
+    transaction is open, so nothing is asserted about it: a transaction that
+    never committed ends rolled back when its connection closes.
+    """
+    try:
+        if connection.in_transaction:
+            connection.rollback()
+    except sqlite3.Error:
+        pass
+
+
+def _discard(connection: sqlite3.Connection) -> None:
+    """Close a connection as a failure propagates; a close failure never replaces it."""
+    try:
+        _close(connection)
+    except sqlite3.Error:
+        pass
+
+
 def _write[T](database_path: str, work: Callable[[sqlite3.Connection], T]) -> T:
-    """Run ``work`` in one BEGIN IMMEDIATE transaction; commit it, or roll all of it back."""
+    """Run ``work`` in one BEGIN IMMEDIATE transaction; commit it, or roll all of it back.
+
+    A failure -- in the work or at COMMIT -- is reported as it was classified
+    before cleanup: rolling back or closing the connection never replaces it.
+    After a confirmed COMMIT the connection is closed normally, and a failure
+    to close it is reported as itself.
+    """
     connection = _connect(database_path)
     try:
-        connection.execute("BEGIN IMMEDIATE")
-        outcome = work(connection)
-        connection.commit()
-        return outcome
-    except sqlite3.Error as exc:
-        if connection.in_transaction:
-            connection.rollback()
-        raise FuturesTradeRecommendationStorageError(
-            "Futures trade recommendation storage is unavailable."
-        ) from exc
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            outcome = work(connection)
+            connection.commit()
+        except sqlite3.Error as exc:
+            _rollback(connection)
+            raise FuturesTradeRecommendationStorageError(
+                "Futures trade recommendation storage is unavailable."
+            ) from exc
+        except BaseException:
+            _rollback(connection)
+            raise
     except BaseException:
-        if connection.in_transaction:
-            connection.rollback()
+        _discard(connection)
         raise
-    finally:
-        connection.close()
+    _close(connection)
+    return outcome
 
 
 def _read[T](database_path: str, work: Callable[[sqlite3.Connection], T]) -> T:
@@ -788,24 +827,26 @@ class SQLiteFuturesTradeRecommendationLifecycleStore(FuturesTradeRecommendationL
 
         connection = _connect(self._database_path)
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            recorded = self._record(connection, previous, current, steps)
-            connection.commit()
-        except (
-            FuturesTradeRecommendationLifecycleConflictError,
-            FuturesTradeRecommendationLifecycleEvidenceError,
-            FuturesTradeRecommendationStorageError,
-        ):
-            connection.rollback()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                recorded = self._record(connection, previous, current, steps)
+                connection.commit()
+            except (
+                FuturesTradeRecommendationLifecycleConflictError,
+                FuturesTradeRecommendationLifecycleEvidenceError,
+                FuturesTradeRecommendationStorageError,
+            ):
+                _rollback(connection)
+                raise
+            except sqlite3.Error as exc:
+                _rollback(connection)
+                raise FuturesTradeRecommendationStorageError(
+                    "Futures trade recommendation storage is unavailable."
+                ) from exc
+        except BaseException:
+            _discard(connection)  # closing rolls back anything still open; never masks
             raise
-        except sqlite3.Error as exc:
-            if connection.in_transaction:
-                connection.rollback()
-            raise FuturesTradeRecommendationStorageError(
-                "Futures trade recommendation storage is unavailable."
-            ) from exc
-        finally:
-            connection.close()
+        _close(connection)
         return recorded
 
     @classmethod
