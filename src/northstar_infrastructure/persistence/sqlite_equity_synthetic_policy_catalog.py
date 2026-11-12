@@ -56,6 +56,12 @@ Failures
   SQLite may or may not have made the publication durable. Nothing is
   asserted, and the Application reconciles by reload.
 
+Cleanup -- rolling back or closing a connection that may already have failed,
+in ``publish`` or when opening one fails -- never replaces the outcome being
+reported (L9-P, as W2 for the EI-4D-B store). After a definite outcome --
+COMMITTED, EQUIVALENT or CONFLICT -- the connection is closed normally, and a
+failure to close it is reported as itself.
+
 The store never retries, sleeps or reads a clock. ``publication_sequence``
 orders publications within the catalog only. No EI-4D record holds it, so it
 is no evidence of when a binding existed relative to a generation record, and
@@ -309,7 +315,7 @@ def _connect(database_path: Path) -> sqlite3.Connection:
         initialize_equity_candle_evidence_schema(connection)
         initialize_equity_intraday_research_timeline_schema(connection)
     except sqlite3.Error as exc:
-        connection.close()
+        _discard(connection)
         raise _unavailable(exc) from exc
     return connection
 
@@ -340,6 +346,18 @@ def _rollback(connection: sqlite3.Connection) -> None:
     try:
         if connection.in_transaction:
             connection.rollback()
+    except sqlite3.Error:
+        pass
+
+
+def _close(connection: sqlite3.Connection) -> None:
+    connection.close()
+
+
+def _discard(connection: sqlite3.Connection) -> None:
+    """Close a connection as a failure propagates; a close failure never replaces it."""
+    try:
+        _close(connection)
     except sqlite3.Error:
         pass
 
@@ -406,53 +424,63 @@ class SQLiteEquitySyntheticPolicyCatalogStore(EquitySyntheticPolicyCatalogStore)
         """Atomically publish the whole ``bundle``: all six bindings or none."""
         if not isinstance(bundle, EquitySyntheticPolicyBundle):
             raise TypeError("bundle must be an EquitySyntheticPolicyBundle.")
-        offered: tuple[_Binding, ...] = (*bundle.components, bundle.policy_set)
         connection = _connect(self._database_path)
         try:
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                stored = [_load(connection, binding) for binding in offered]
-                conflicts = tuple(
-                    found
-                    for found, binding in zip(stored, offered, strict=True)
-                    if found is not None and found != binding
-                )
-                if conflicts:
-                    _rollback(connection)  # nothing was written
-                    return EquitySyntheticPolicyCatalogWrite(_OUTCOME.CONFLICT, conflicts)
-                if all(found is not None for found in stored):
-                    _rollback(connection)  # nothing to write
-                    return EquitySyntheticPolicyCatalogWrite(_OUTCOME.EQUIVALENT, ())
-                sequence = connection.execute(_NEXT_SEQUENCE).fetchone()[0]
-                policy_set = bundle.policy_set
-                _insert_publication(
-                    connection,
-                    (
-                        sequence,
-                        policy_set.namespace,
-                        policy_set.version.value,
-                        policy_set.policy_set_fingerprint,
-                    ),
-                )
-                for found, component in zip(stored, bundle.components, strict=False):
-                    if found is None:
-                        _insert_definition(connection, definition_row(component, sequence))
-                _insert_set(connection, set_row(policy_set, sequence))
-            except sqlite3.Error as exc:
-                _rollback(connection)
-                raise EquitySyntheticPolicyCatalogNotCommittedError(
-                    f"The policy catalog refused the publication; nothing was written: {exc}"
-                ) from exc
-            except BaseException:
-                _rollback(connection)
-                raise
-            try:
-                _commit(connection)
-            except Exception as exc:
-                _rollback(connection)
-                raise EquitySyntheticPolicyCatalogCommitUnconfirmedError(
-                    f"COMMIT failed; whether the publication is durable is unknown: {exc}"
-                ) from exc
-            return EquitySyntheticPolicyCatalogWrite(_OUTCOME.COMMITTED, ())
-        finally:
-            connection.close()
+            written = self._publish_in(connection, bundle)
+        except BaseException:
+            _discard(connection)  # a close failure never replaces the failure reported
+            raise
+        _close(connection)  # after a definite outcome, a close failure is reported as itself
+        return written
+
+    @staticmethod
+    def _publish_in(
+        connection: sqlite3.Connection, bundle: EquitySyntheticPolicyBundle
+    ) -> EquitySyntheticPolicyCatalogWrite:
+        """The publication transaction on ``connection``, which the caller closes."""
+        offered: tuple[_Binding, ...] = (*bundle.components, bundle.policy_set)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            stored = [_load(connection, binding) for binding in offered]
+            conflicts = tuple(
+                found
+                for found, binding in zip(stored, offered, strict=True)
+                if found is not None and found != binding
+            )
+            if conflicts:
+                _rollback(connection)  # nothing was written
+                return EquitySyntheticPolicyCatalogWrite(_OUTCOME.CONFLICT, conflicts)
+            if all(found is not None for found in stored):
+                _rollback(connection)  # nothing to write
+                return EquitySyntheticPolicyCatalogWrite(_OUTCOME.EQUIVALENT, ())
+            sequence = connection.execute(_NEXT_SEQUENCE).fetchone()[0]
+            policy_set = bundle.policy_set
+            _insert_publication(
+                connection,
+                (
+                    sequence,
+                    policy_set.namespace,
+                    policy_set.version.value,
+                    policy_set.policy_set_fingerprint,
+                ),
+            )
+            for found, component in zip(stored, bundle.components, strict=False):
+                if found is None:
+                    _insert_definition(connection, definition_row(component, sequence))
+            _insert_set(connection, set_row(policy_set, sequence))
+        except sqlite3.Error as exc:
+            _rollback(connection)
+            raise EquitySyntheticPolicyCatalogNotCommittedError(
+                f"The policy catalog refused the publication; nothing was written: {exc}"
+            ) from exc
+        except BaseException:
+            _rollback(connection)
+            raise
+        try:
+            _commit(connection)
+        except Exception as exc:
+            _rollback(connection)
+            raise EquitySyntheticPolicyCatalogCommitUnconfirmedError(
+                f"COMMIT failed; whether the publication is durable is unknown: {exc}"
+            ) from exc
+        return EquitySyntheticPolicyCatalogWrite(_OUTCOME.COMMITTED, ())
