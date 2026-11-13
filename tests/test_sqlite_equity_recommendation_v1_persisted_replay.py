@@ -104,6 +104,7 @@ _INFRA_ROOT = Path(__file__).resolve().parents[1]
 # ----------------------------------------------------------------------
 
 _EVALUATOR_V1 = "northstar.equity-recommendation-evaluator/1"
+_EVALUATOR_V2 = "northstar.equity-recommendation-evaluator/2"
 _INPUTS_V1 = "northstar.equity-recommendation-generation-inputs/1"
 _ASSESSMENT_V1 = "northstar.equity-recommendation-assessment/1"
 _PROPOSAL_V1 = "northstar.equity-recommendation-proposal/1"
@@ -361,7 +362,14 @@ def test_the_reference_is_version1_with_its_original_provenance() -> None:
 
 def test_the_version1_contract_is_the_one_the_application_runs() -> None:
     assert EQUITY_RECOMMENDATION_EVALUATOR_VERSION == _EVALUATOR_V1
-    assert SUPPORTED_EQUITY_RECOMMENDATION_EVALUATOR_VERSIONS == frozenset({_EVALUATOR_V1})
+    # Exactly one of the two governed states (ADR-025): version 1 alone, before the
+    # Application's version-2 upgrade, or the closed table of /1 and /2 after it.
+    # Version 1 is supported in both; no other label is ever accepted.
+    assert SUPPORTED_EQUITY_RECOMMENDATION_EVALUATOR_VERSIONS in (
+        frozenset({_EVALUATOR_V1}),
+        frozenset({_EVALUATOR_V1, _EVALUATOR_V2}),
+    )
+    assert UNSUPPORTED_EVALUATOR not in SUPPORTED_EQUITY_RECOMMENDATION_EVALUATOR_VERSIONS
     assert (
         EQUITY_RECOMMENDATION_INPUTS_FORMAT,
         EQUITY_RECOMMENDATION_ASSESSMENT_FORMAT,
@@ -370,7 +378,7 @@ def test_the_version1_contract_is_the_one_the_application_runs() -> None:
     ) == (_INPUTS_V1, _ASSESSMENT_V1, _PROPOSAL_V1, _ATTEMPT_V1)
     for format_, prefix in _PREFIX.items():
         assert EQUITY_RECOMMENDATION_DOCUMENT_PREFIXES[format_] == prefix
-    assert UNSUPPORTED_EVALUATOR not in {_EVALUATOR_V1, _EVALUATOR_V1[:-1] + "2"}
+    assert UNSUPPORTED_EVALUATOR not in {_EVALUATOR_V1, _EVALUATOR_V2}
 
 
 # ======================================================================
