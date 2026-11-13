@@ -91,7 +91,9 @@ _K = EquityRecommendationDispositionKind
 _W = EquityRecommendationStoreOutcome
 _Records = tuple[EquityRecommendationGenerationDisposition, EquityRecommendationGenerationAttempt]
 _Commit = Callable[[sqlite3.Connection], None]
-_FUTURE_EVALUATOR = "northstar.equity-recommendation-evaluator/2"
+# EI-4C slice 2 (TH-02): ADR-025 approves evaluator /2 and the /2 document formats, so
+# neither can stand for an unknown version. /999 and /9 are outside the governed set.
+_UNSUPPORTED_EVALUATOR = "northstar.equity-recommendation-evaluator/999"
 
 
 @pytest.fixture(autouse=True)
@@ -644,7 +646,7 @@ def _statements(research: Research, pipeline: Pipeline) -> list[str]:
     return [
         f"UPDATE {DISPOSITIONS} SET disposition_kind = 'PROPOSED' "
         "WHERE disposition_kind = 'UNRESOLVED'",
-        f"UPDATE {DISPOSITIONS} SET evaluator_version = '{_FUTURE_EVALUATOR}'",
+        f"UPDATE {DISPOSITIONS} SET evaluator_version = '{_UNSUPPORTED_EVALUATOR}'",
         f"UPDATE {DISPOSITIONS} SET candidate_entry_fingerprint = '{repeat}'",
         f"UPDATE {DISPOSITIONS} SET evidence_snapshot_id = '{s46}'",
         f"UPDATE {DISPOSITIONS} SET assessment_document = assessment_document",
@@ -719,10 +721,10 @@ def test_e20_a_corrupted_stored_disposition_fails_closed_and_is_never_repaired(
         ),
         "unsupported format": (
             "assessment_document",
-            _assessment_with(document, format="northstar.equity-recommendation-assessment/2"),
+            _assessment_with(document, format="northstar.equity-recommendation-assessment/9"),
             False,
         ),
-        "unsupported evaluator": ("evaluator_version", _FUTURE_EVALUATOR, True),
+        "unsupported evaluator": ("evaluator_version", _UNSUPPORTED_EVALUATOR, True),
         "empty evaluator": ("evaluator_version", "", False),
     }[case]
     bypass(  # TEST-ONLY corruption of the disposable database
@@ -903,7 +905,7 @@ def test_e21_a_corrupt_stored_attempt_is_typed_by_the_adapter_and_mapped_by_the_
     if corruption == "reordered document":
         text, checks = json.dumps(loaded, sort_keys=True, indent=1), True
     else:
-        loaded["format"] = "northstar.equity-recommendation-generation-attempt/2"
+        loaded["format"] = "northstar.equity-recommendation-generation-attempt/9"
         text, checks = json.dumps(loaded, sort_keys=True, separators=(",", ":")), False
     bypass(  # TEST-ONLY corruption of the disposable database
         pipeline.database,

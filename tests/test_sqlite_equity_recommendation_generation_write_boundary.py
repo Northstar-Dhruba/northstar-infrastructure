@@ -59,7 +59,13 @@ from tests.equity_recommendation_acceptance_fixtures import (
 from tests.equity_recommendation_acceptance_fixtures import (
     rows as acceptance_rows,
 )
-from tests.equity_recommendation_generation_fixtures import ATTEMPTS, DISPOSITIONS, World, records
+from tests.equity_recommendation_generation_fixtures import (
+    ATTEMPTS,
+    DISPOSITIONS,
+    UNSUPPORTED_EVALUATOR,
+    World,
+    records,
+)
 from tests.equity_recommendation_write_authorization_fixtures import plant_generation_records
 
 _O = EquityRecommendationRecordingOutcome
@@ -187,7 +193,7 @@ def test_a_disposition_changed_after_issuance_is_refused(
     authorization = world.authorize(world.proposed())
     other, _ = records(world.unresolved())  # the same key, other content and kind
     assert other.generation_key == authorization.disposition.generation_key
-    value = {"evaluator_version": "northstar.equity-recommendation-evaluator/2"}.get(
+    value = {"evaluator_version": UNSUPPORTED_EVALUATOR}.get(  # TH-02: never the approved /2
         field_name, getattr(other, field_name)
     )
     _tamper(authorization.disposition, field_name, value)  # cases 8, 10, 11 (and content)

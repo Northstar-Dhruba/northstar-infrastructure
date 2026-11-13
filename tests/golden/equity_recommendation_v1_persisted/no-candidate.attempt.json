@@ -1,0 +1,105 @@
+{
+  "assessment_fingerprint": null,
+  "checks": [
+    {
+      "check": "AUTHORITATIVE_CANDIDATE",
+      "reasons": [
+        "NO_AUTHORITATIVE_CANDIDATE"
+      ],
+      "status": "FAILED"
+    },
+    {
+      "check": "SYNTHETIC_REFERENCES",
+      "reasons": [],
+      "status": "NOT_EVALUATED"
+    },
+    {
+      "check": "SESSION_TIMING",
+      "reasons": [],
+      "status": "NOT_EVALUATED"
+    },
+    {
+      "check": "LISTING_ELIGIBILITY",
+      "reasons": [],
+      "status": "NOT_EVALUATED"
+    },
+    {
+      "check": "OPEN_RECOMMENDATIONS",
+      "reasons": [],
+      "status": "NOT_EVALUATED"
+    },
+    {
+      "check": "CORE_FORMATION",
+      "reasons": [],
+      "status": "NOT_EVALUATED"
+    },
+    {
+      "check": "SAME_LISTING_EXCLUSIVITY",
+      "reasons": [],
+      "status": "NOT_ASSESSED"
+    },
+    {
+      "check": "PORTFOLIO_EXPOSURE",
+      "reasons": [],
+      "status": "NOT_ASSESSED"
+    },
+    {
+      "check": "DAILY_LOSS_LIMIT",
+      "reasons": [],
+      "status": "NOT_ASSESSED"
+    },
+    {
+      "check": "PRE_ENTRY_INVALIDATION",
+      "reasons": [],
+      "status": "NOT_ASSESSED"
+    },
+    {
+      "check": "CORPORATE_ACTIONS",
+      "reasons": [],
+      "status": "NOT_ASSESSED"
+    },
+    {
+      "check": "EXCHANGE_SURVEILLANCE",
+      "reasons": [],
+      "status": "NOT_ASSESSED"
+    },
+    {
+      "check": "CANDLE_REVISION_MATERIALITY",
+      "reasons": [],
+      "status": "NOT_ASSESSED"
+    }
+  ],
+  "disposition_kind": null,
+  "format": "northstar.equity-recommendation-generation-attempt/1",
+  "generation_key": null,
+  "reasons": [
+    "NO_AUTHORITATIVE_CANDIDATE"
+  ],
+  "request": {
+    "listing": {
+      "exchange_code": "NSE",
+      "symbol": "M&M"
+    },
+    "listing_eligibility_version": "synthetic-ei4db-eligibility/1",
+    "policy_set": {
+      "cost_schedule_version": "synthetic-ei4db-costs/1",
+      "generation_policy_version": "synthetic-ei4db-generation/1",
+      "price_increment_version": "synthetic-ei4db-increment/1",
+      "risk_policy_version": "synthetic-ei4db-risk/1",
+      "timing_policy_version": "synthetic-ei4db-timing/1",
+      "version": "synthetic-ei4db-set/1"
+    },
+    "research_configuration": {
+      "minimum_baseline_bars": 3,
+      "opening_range_bars": 3,
+      "strategy": "ei3c-sqlite-orb-vwap-volume",
+      "timeframe": "5m",
+      "version": "synthetic-ei3c-sqlite/1",
+      "volume_multiplier": "1",
+      "window_policy_version": "nse-equity-intraday-v1-research-window/1"
+    },
+    "strategy": "ei3c-sqlite-orb-vwap-volume",
+    "trading_date": "2026-09-07"
+  },
+  "status": "NO_CANDIDATE"
+}
