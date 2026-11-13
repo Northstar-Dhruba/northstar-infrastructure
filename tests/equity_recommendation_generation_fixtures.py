@@ -12,7 +12,6 @@ empty history asserted because no issuer exists (EI4-D9-H).
 
 from __future__ import annotations
 
-import dataclasses
 from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -79,7 +78,11 @@ from tests.equity_recommendation_write_authorization_fixtures import capture_aut
 
 DISPOSITIONS = "equity_recommendation_generation_dispositions"
 ATTEMPTS = "equity_recommendation_generation_attempts"
-FUTURE_EVALUATOR = "northstar.equity-recommendation-evaluator/2"
+# A deliberately unsupported evaluator label (EI-4C slice 2, TH-02). ADR-025
+# approves exactly northstar.equity-recommendation-evaluator/1 and /2, so /2
+# can no longer stand for an unknown evaluator; /999 is outside that set and
+# used by no production module (TH-03).
+UNSUPPORTED_EVALUATOR = "northstar.equity-recommendation-evaluator/999"
 _STATUS = EquityRecommendationGenerationStatus
 
 
@@ -371,10 +374,3 @@ def records(audit: EquityRecommendationEligibilityAudit) -> Records:
     disposition = equity_recommendation_disposition(audit)
     assert disposition is not None
     return disposition, equity_recommendation_attempt(audit)
-
-
-def relabelled(
-    disposition: EquityRecommendationGenerationDisposition, evaluator: str = FUTURE_EVALUATOR
-) -> EquityRecommendationGenerationDisposition:
-    """The same content under another evaluator label: needs that label to be supported."""
-    return dataclasses.replace(disposition, evaluator_version=evaluator)

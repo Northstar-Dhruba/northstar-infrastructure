@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from northstar_application.application_services import (
     EQUITY_RECOMMENDATION_EVALUATOR_VERSION,
+    EquityRecommendationGenerationAttempt,
     EquityRecommendationGenerationDisposition,
     EquityRecommendationGenerationVerifier,
     EquityRecommendationRecordingOutcome,
@@ -37,9 +38,6 @@ from northstar_application.application_services import (
     InvalidEquityRecommendationRecordError,
     VerifyStoredEquityRecommendationGenerationUseCase,
     equity_recommendation_attempt,
-)
-from northstar_application.application_services import (
-    equity_recommendation_generation_decoding as decoding_module,
 )
 from northstar_application.ports import (
     EquityRecommendationGenerationCommitUnconfirmedError,
@@ -69,12 +67,10 @@ from tests.equity_intraday_research_timeline_fixtures import Harness, count, ist
 from tests.equity_recommendation_generation_fixtures import (
     ATTEMPTS,
     DISPOSITIONS,
-    FUTURE_EVALUATOR,
+    UNSUPPORTED_EVALUATOR,
     World,
     records,
-    relabelled,
 )
-from tests.equity_recommendation_write_authorization_fixtures import plant_generation_records
 
 _O = EquityRecommendationRecordingOutcome
 _W = EquityRecommendationStoreOutcome
@@ -94,20 +90,6 @@ def _refuse_network(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def world(tmp_path: Path) -> World:
     return World(tmp_path / "northstar.sqlite3")
-
-
-@pytest.fixture
-def second_label(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test-only: admit a second evaluator LABEL to record construction.
-
-    No second evaluator exists or is executed; the verifier still replays only
-    EQUITY_RECOMMENDATION_EVALUATOR_VERSION.
-    """
-    monkeypatch.setattr(
-        decoding_module,
-        "SUPPORTED_EQUITY_RECOMMENDATION_EVALUATOR_VERSIONS",
-        frozenset({EQUITY_RECOMMENDATION_EVALUATOR_VERSION, FUTURE_EVALUATOR}),
-    )
 
 
 def _counts(database: Path) -> tuple[int, int]:
@@ -400,7 +382,7 @@ def test_ak_a_deleted_source_is_a_structural_violation_and_fails_verification(
     "statement",
     [
         f"UPDATE {DISPOSITIONS} SET disposition_kind = 'PROPOSED'",
-        f"UPDATE {DISPOSITIONS} SET evaluator_version = '{FUTURE_EVALUATOR}'",
+        f"UPDATE {DISPOSITIONS} SET evaluator_version = '{UNSUPPORTED_EVALUATOR}'",
         f"UPDATE {DISPOSITIONS} SET assessment_document = assessment_document",
         f"UPDATE {DISPOSITIONS} SET candidate_entry_fingerprint = candidate_entry_fingerprint",
         f"UPDATE {DISPOSITIONS} SET evidence_snapshot_id = evidence_snapshot_id",
@@ -614,52 +596,99 @@ def test_n_g_different_content_never_replaces_the_first_record(world: World) -> 
     }
 
 
-@pytest.mark.usefixtures("second_label")
-def test_o_the_same_content_under_another_evaluator_is_a_conflict(world: World) -> None:
-    current, attempt = records(world.proposed())
-    other = relabelled(current)
-    assert (other.assessment_fingerprint, other.proposal_fingerprint) == (
-        current.assessment_fingerprint,
-        current.proposal_fingerprint,
-    )
-    # TEST-ONLY LEGACY-EVIDENCE SETUP: the current recorder never authorizes another
-    # evaluator's record, so it stands here as evidence planted by raw SQL.
+# ----------------------------------------------------------------------
+# O, O-A, P. A stored row under an evaluator label this code does not run
+#
+# EI-4C slice 2 (TH-02). These tests used to build version-1 documents under a
+# second, monkeypatched *supported* label (northstar.equity-recommendation-
+# evaluator/2). ADR-025 approves /2, and slice 3a's label-format pairing makes
+# a record pairing /1 documents with any other label unconstructible, so that
+# premise is gone. No record is constructed under another label here: the row
+# is the valid version-1 row with only its evaluator column changed, planted
+# below the adapter by raw SQL (TEST-ONLY LEGACY-EVIDENCE SETUP). An unknown
+# label is IncompatibleEquityRecommendationRecordError before and after slice
+# 3a. A genuine version-1 versus version-2 same-key conflict (VC-09, recorder
+# EVALUATOR_VERSION_CONFLICT on SQLite) needs a real version-2 record and is
+# PLANNED for slices 3a and 4. The version-1 same-key content conflict is
+# test_n_g.
+# ----------------------------------------------------------------------
+
+
+def _plant_under_label(
+    world: World,
+    disposition: EquityRecommendationGenerationDisposition,
+    attempt: EquityRecommendationGenerationAttempt,
+    label: str,
+) -> None:
+    """TEST-ONLY LEGACY-EVIDENCE SETUP: the valid version-1 rows, relabelled by raw SQL.
+
+    Nothing constructs a record under ``label``; constraints, foreign keys and
+    insert-only triggers still apply to these INSERTs.
+    """
+    columns = adapter_module.DISPOSITION_COLUMNS
+    row = list(adapter_module.disposition_row(disposition))
+    row[columns.index("evaluator_version")] = label
     _with_schema(world)
-    plant_generation_records(world.database, other, attempt)
-    written = world.store().write_generation(world.authorize(world.proposed()))
-    assert (written.outcome, written.stored) == (_W.CONFLICT, other)  # never equivalent
-    assert _rows(world.database, DISPOSITIONS)[0]["evaluator_version"] == FUTURE_EVALUATOR
+    _insert(world.database, DISPOSITIONS, columns, tuple(row))
+    _insert(
+        world.database,
+        ATTEMPTS,
+        adapter_module.ATTEMPT_COLUMNS,
+        adapter_module.attempt_row(attempt),
+    )
 
 
-@pytest.mark.usefixtures("second_label")
-def test_o_a_stored_record_of_another_evaluator_is_reported_never_adopted(
+def test_o_identical_documents_under_an_unknown_evaluator_are_never_equivalent(
     world: World,
 ) -> None:
     current, attempt = records(world.proposed())
-    _with_schema(world)
-    plant_generation_records(world.database, relabelled(current), attempt)  # TEST-ONLY setup
+    authorization = world.authorize(world.proposed())  # genuine, issued before planting
+    _plant_under_label(world, current, attempt, UNSUPPORTED_EVALUATOR)
+    stored = _rows(world.database, DISPOSITIONS)
+    # Byte-identical documents and fingerprints: only the evaluator label differs.
+    assert (
+        stored[0]["assessment_document"],
+        stored[0]["assessment_fingerprint"],
+        stored[0]["proposal_fingerprint"],
+        stored[0]["evaluator_version"],
+    ) == (
+        current.assessment_document,
+        current.assessment_fingerprint,
+        current.proposal_fingerprint,
+        UNSUPPORTED_EVALUATOR,
+    )
+    before = (stored, _rows(world.database, ATTEMPTS))
+    # Never EQUIVALENT, never adopted, never replaced: the write fails closed, typed.
+    with pytest.raises(IncompatibleEquityRecommendationRecordError):
+        world.store().write_generation(authorization)
+    assert (_rows(world.database, DISPOSITIONS), _rows(world.database, ATTEMPTS)) == before
+
+
+def test_o_a_a_stored_record_of_an_unknown_evaluator_is_reported_never_adopted(
+    world: World,
+) -> None:
+    current, attempt = records(world.proposed())
+    _plant_under_label(world, current, attempt, UNSUPPORTED_EVALUATOR)
+    before = (_rows(world.database, DISPOSITIONS), _rows(world.database, ATTEMPTS))
     result = world.recorder().execute(world.proposed())
-    assert result.outcome is _O.EVALUATOR_VERSION_CONFLICT
+    assert result.outcome is _O.STORED_RECORD_INCOMPATIBLE
     assert result.authoritative is None and not result.is_stored
-    assert _rows(world.database, DISPOSITIONS)[0]["evaluator_version"] == FUTURE_EVALUATOR
+    assert result.attempt_recorded is None
+    assert (_rows(world.database, DISPOSITIONS), _rows(world.database, ATTEMPTS)) == before
+    assert _rows(world.database, DISPOSITIONS)[0]["evaluator_version"] == UNSUPPORTED_EVALUATOR
 
 
 def test_p_an_unsupported_stored_evaluator_is_incompatible(world: World) -> None:
-    disposition, _ = records(world.proposed())
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(
-            decoding_module,
-            "SUPPORTED_EQUITY_RECOMMENDATION_EVALUATOR_VERSIONS",
-            frozenset({EQUITY_RECOMMENDATION_EVALUATOR_VERSION, FUTURE_EVALUATOR}),
-        )
-        _, attempt = records(world.proposed())
-        _with_schema(world)
-        # TEST-ONLY LEGACY-EVIDENCE SETUP: a record from an evaluator the recorder
-        # does not run is never authorized, so it is planted by raw SQL.
-        plant_generation_records(world.database, relabelled(disposition), attempt)
-    # Only the current evaluator is supported again: the stored /2 record is incompatible.
-    with pytest.raises(IncompatibleEquityRecommendationRecordError, match="not supported"):
+    disposition, attempt = records(world.proposed())
+    _plant_under_label(world, disposition, attempt, UNSUPPORTED_EVALUATOR)
+    with pytest.raises(IncompatibleEquityRecommendationRecordError):
         world.store().load_disposition(disposition.generation_key)
+    with pytest.raises(IncompatibleEquityRecommendationRecordError):
+        VerifyStoredEquityRecommendationGenerationUseCase(world.store(), world.verifier()).execute(
+            disposition.generation_key
+        )
+    # The attempt names no evaluator, so it still loads as the version-1 attempt it is.
+    assert world.store().load_attempt(attempt.attempt_identity) == attempt
     result = world.recorder().execute(world.proposed())
     assert result.outcome is _O.STORED_RECORD_INCOMPATIBLE and not result.is_stored
     assert _counts(world.database) == (1, 1)
@@ -1126,7 +1155,7 @@ def _tampered(
         "corrupted json": ([_set("assessment_document", document[:-7])], False, _invalid),
         "non-canonical json": ([_set("assessment_document", pretty)], True, _invalid),
         "unsupported evaluator": (
-            [_set("evaluator_version", FUTURE_EVALUATOR)],
+            [_set("evaluator_version", UNSUPPORTED_EVALUATOR)],
             True,
             _incompatible,
         ),

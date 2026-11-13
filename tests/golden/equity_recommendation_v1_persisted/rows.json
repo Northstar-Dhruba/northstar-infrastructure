@@ -1,0 +1,53 @@
+{
+  "disposition": {
+    "assessment_fingerprint": "eira1-sha256:a6f076008a3de16c1791d2777805e8e36318fee9f9d3185d42b7bd4fe7f95321",
+    "assessment_format": "northstar.equity-recommendation-assessment/1",
+    "candidate_entry_fingerprint": "eirt1-sha256:98b13f3e6e392e20bd04b726417d52179df27772239f3e3856b1e065cd1b2618",
+    "candidate_sequence": 1,
+    "decision_as_of": "2026-08-12T04:06:00Z",
+    "disposition_kind": "PROPOSED",
+    "evaluator_version": "northstar.equity-recommendation-evaluator/1",
+    "evidence_snapshot_id": "ecs1-sha256:8a7ffc0e682dc5d94deee620633a8ad1e9e4261c14a859b3cfefbb618a735859",
+    "exchange_code": "NSE",
+    "generation_key": "eirk1-sha256:7c31bc99f52c080d0f1678d265bedaa2b5be41b3eac3056f335e35305cf4c9f6",
+    "inputs_fingerprint": "eiri1-sha256:0714aa9217ca7fdafe304067ead994b39286def6cf5bfd736d3ad1756faf804c",
+    "manifest_fingerprint": "ecm1-sha256:a8cfb438f4aae2c294125c9656788ebce6115c1b0764add54cd5950e127b582f",
+    "policy_set_fingerprint": "eirs1-sha256:942dce39f255d8068a8dd758c71c69e647988465838bccc08bb687d62f0d6771",
+    "policy_set_version": "synthetic-ei4db-set/1",
+    "proposal_fingerprint": "eirp1-sha256:d8bbc301d3505b9b4a6272452b0d372bee23c3d8e2b6e8533eac8f0c5d3d9aa6",
+    "proposal_format": "northstar.equity-recommendation-proposal/1",
+    "research_configuration_version": "synthetic-ei3c-sqlite/1",
+    "research_decision_fingerprint": "eir1-sha256:7d2b6a702326b2b7f2e4eb734941ed6b81ecad92c937b1def40d6370129d566e",
+    "strategy": "ei3c-sqlite-orb-vwap-volume",
+    "symbol": "M&M",
+    "trading_date": "2026-08-12"
+  },
+  "keyed_attempt": {
+    "assessment_fingerprint": "eira1-sha256:a6f076008a3de16c1791d2777805e8e36318fee9f9d3185d42b7bd4fe7f95321",
+    "attempt_format": "northstar.equity-recommendation-generation-attempt/1",
+    "attempt_identity": "eirat1-sha256:15fb34389d05af4ae7cc340cada2c786a72e1f0adc0bd4d114dec3bfb8bec05c",
+    "disposition_key": "eirk1-sha256:7c31bc99f52c080d0f1678d265bedaa2b5be41b3eac3056f335e35305cf4c9f6",
+    "disposition_kind": "PROPOSED",
+    "exchange_code": "NSE",
+    "generation_key": "eirk1-sha256:7c31bc99f52c080d0f1678d265bedaa2b5be41b3eac3056f335e35305cf4c9f6",
+    "policy_set_version": "synthetic-ei4db-set/1",
+    "status": "PROPOSED",
+    "strategy": "ei3c-sqlite-orb-vwap-volume",
+    "symbol": "M&M",
+    "trading_date": "2026-08-12"
+  },
+  "keyless_attempt": {
+    "assessment_fingerprint": null,
+    "attempt_format": "northstar.equity-recommendation-generation-attempt/1",
+    "attempt_identity": "eirat1-sha256:a460694b437eb00b07d07bf4bcfd03654512d90213dd7f1620fdab3612aebd31",
+    "disposition_key": null,
+    "disposition_kind": null,
+    "exchange_code": "NSE",
+    "generation_key": null,
+    "policy_set_version": "synthetic-ei4db-set/1",
+    "status": "NO_CANDIDATE",
+    "strategy": "ei3c-sqlite-orb-vwap-volume",
+    "symbol": "M&M",
+    "trading_date": "2026-09-07"
+  }
+}
