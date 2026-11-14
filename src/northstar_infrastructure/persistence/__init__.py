@@ -35,6 +35,12 @@ from northstar_infrastructure.persistence.sqlite_equity_recommendation_issuance 
 from northstar_infrastructure.persistence.sqlite_equity_recommendation_issuance_schema import (
     initialize_equity_recommendation_issuance_schema,
 )
+from northstar_infrastructure.persistence.sqlite_equity_recommendation_lifecycle import (
+    SQLiteEquityRecommendationLifecycleStore,
+)
+from northstar_infrastructure.persistence.sqlite_equity_recommendation_lifecycle_schema import (
+    initialize_equity_recommendation_lifecycle_schema,
+)
 from northstar_infrastructure.persistence.sqlite_equity_synthetic_policy_catalog import (
     SQLiteEquitySyntheticPolicyCatalogStore,
 )
@@ -152,6 +158,8 @@ __all__ = [
     "initialize_equity_recommendation_generation_schema",
     "SQLiteEquityRecommendationIssuanceAuthority",
     "initialize_equity_recommendation_issuance_schema",
+    "SQLiteEquityRecommendationLifecycleStore",
+    "initialize_equity_recommendation_lifecycle_schema",
     "FORWARD_RESEARCH_RECORD_SCHEMA",
     "PAPER_FILL_PORTFOLIO_INDEX",
     "PAPER_FILL_SCHEMA",
