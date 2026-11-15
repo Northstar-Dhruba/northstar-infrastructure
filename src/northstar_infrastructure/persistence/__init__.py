@@ -11,6 +11,9 @@ from northstar_infrastructure.persistence.sqlite_equity_candle_evidence_schema i
     EQUITY_CANDLE_JOURNAL_SCHEMA,
     initialize_equity_candle_evidence_schema,
 )
+from northstar_infrastructure.persistence.sqlite_equity_candle_evidence_snapshot_catalog import (
+    SQLiteEquityCandleEvidenceSnapshotCatalog,
+)
 from northstar_infrastructure.persistence.sqlite_equity_intraday_research_timeline import (
     EquityIntradayResearchTimelineStorageError,
     SQLiteEquityIntradayResearchTimelineStore,
@@ -145,6 +148,7 @@ __all__ = [
     "EquityCandleEvidenceStorageError",
     "SQLiteEquityCandleEvidenceJournal",
     "SQLiteEquityCandleEvidenceSnapshotStore",
+    "SQLiteEquityCandleEvidenceSnapshotCatalog",
     "EquityIntradayResearchTimelineStorageError",
     "SQLiteEquityIntradayResearchTimelineStore",
     "decision_instant_microseconds",
