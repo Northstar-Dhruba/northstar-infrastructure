@@ -14,6 +14,10 @@ from northstar_infrastructure.persistence.sqlite_equity_candle_evidence_schema i
 from northstar_infrastructure.persistence.sqlite_equity_candle_evidence_snapshot_catalog import (
     SQLiteEquityCandleEvidenceSnapshotCatalog,
 )
+from northstar_infrastructure.persistence.sqlite_equity_evidence_read_only import (
+    SQLiteReadOnlyEquityCandleEvidenceSnapshotReader,
+    SQLiteReadOnlyEquityIntradayResearchTimelineReader,
+)
 from northstar_infrastructure.persistence.sqlite_equity_intraday_research_timeline import (
     EquityIntradayResearchTimelineStorageError,
     SQLiteEquityIntradayResearchTimelineStore,
@@ -43,6 +47,11 @@ from northstar_infrastructure.persistence.sqlite_equity_recommendation_lifecycle
 )
 from northstar_infrastructure.persistence.sqlite_equity_recommendation_lifecycle_schema import (
     initialize_equity_recommendation_lifecycle_schema,
+)
+from northstar_infrastructure.persistence.sqlite_equity_recommendation_read_only import (
+    SQLiteReadOnlyEquityRecommendationGenerationReader,
+    SQLiteReadOnlyEquityRecommendationIssuanceReader,
+    SQLiteReadOnlyEquityRecommendationLifecycleReader,
 )
 from northstar_infrastructure.persistence.sqlite_equity_synthetic_policy_catalog import (
     SQLiteEquitySyntheticPolicyCatalogStore,
@@ -164,6 +173,11 @@ __all__ = [
     "initialize_equity_recommendation_issuance_schema",
     "SQLiteEquityRecommendationLifecycleStore",
     "initialize_equity_recommendation_lifecycle_schema",
+    "SQLiteReadOnlyEquityCandleEvidenceSnapshotReader",
+    "SQLiteReadOnlyEquityIntradayResearchTimelineReader",
+    "SQLiteReadOnlyEquityRecommendationGenerationReader",
+    "SQLiteReadOnlyEquityRecommendationIssuanceReader",
+    "SQLiteReadOnlyEquityRecommendationLifecycleReader",
     "FORWARD_RESEARCH_RECORD_SCHEMA",
     "PAPER_FILL_PORTFOLIO_INDEX",
     "PAPER_FILL_SCHEMA",
