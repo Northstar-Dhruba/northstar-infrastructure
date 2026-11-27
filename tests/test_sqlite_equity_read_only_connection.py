@@ -32,6 +32,8 @@ import pytest
 from northstar_application.ports import (
     EquityCandleEvidenceUnavailableError,
     EquityIntradayResearchTimelineUnavailableError,
+    EquityReadStorageIntegrityCondition,
+    EquityReadStorageIntegrityError,
     EquityRecommendationGenerationStoreUnavailableError,
     EquityRecommendationIssuanceUnavailableError,
     EquityRecommendationLifecycleStoreUnavailableError,
@@ -48,6 +50,7 @@ from tests.equity_read_only_fixtures import (
     base_world,
     convert_to_wal,
     crash_image,
+    damage_page,
     file_state,
     readers,
     research_snapshot_ids,
@@ -121,6 +124,17 @@ def _failing_calls(database: Path) -> dict[str, Callable[[], Any]]:
         "timelines": lambda: r["timelines"].load(CONFIG.strategy, TCS, DAY),
         "snapshots": lambda: r["snapshots"].get_snapshot("ecs1-sha256:" + "0" * 64),
     }
+
+
+def _assert_every_family_permanent(
+    database: Path, condition: EquityReadStorageIntegrityCondition
+) -> None:
+    for family, call in _failing_calls(database).items():
+        with pytest.raises(EquityReadStorageIntegrityError) as raised:
+            call()
+        assert raised.value.condition is condition, family
+        assert not isinstance(raised.value, _UNAVAILABLE[family]), family
+        assert str(database.parent) not in str(raised.value), family
 
 
 def _assert_every_family_unavailable(database: Path) -> None:
@@ -410,11 +424,14 @@ def test_r7_the_wal_refusal_happens_before_sqlite_opens_the_file(
     assert opened == []
 
 
-def test_r7_a_file_that_is_not_a_database_is_unavailable_and_unchanged(tmp_path: Path) -> None:
+def test_r7_a_file_that_is_not_a_database_is_unusable_storage_and_unchanged(
+    tmp_path: Path,
+) -> None:
+    """SI-B (EI7-SI1): SQLITE_NOTADB is permanent unusable storage, not unavailability."""
     garbage = tmp_path / "garbage.sqlite3"
     garbage.write_bytes(b"\x00not a database" * 512)
     before = file_state(garbage)
-    _assert_every_family_unavailable(garbage)
+    _assert_every_family_permanent(garbage, EquityReadStorageIntegrityCondition.UNUSABLE)
     assert file_state(garbage) == before
 
 
@@ -628,24 +645,15 @@ def test_r10_accepted_writers_still_write_and_readers_see_only_committed_states(
 # Engine-level SQLite conditions (EI-7D final audit, check 1)
 # ----------------------------------------------------------------------
 #
-# Every sqlite3.Error is the calling reader's typed unavailability, with SQLite's
-# error name in the message and the SQLite error as the cause. The accepted reader
-# ports have no permanent-integrity form for a storage-engine fault, so engine
-# corruption is classified as the accepted EI-4D/EI-6A/EI-6B adapters classify
-# it: a documented limitation pending an Application contract decision. These
-# tests pin that classification so it can only change deliberately.
+# Since SI-B (EI7-SI1, approved 2026-11-28; SI-A contract merged): SQLITE_CORRUPT
+# and SQLITE_NOTADB are the Application's permanent EquityReadStorageIntegrityError
+# (CORRUPT, UNUSABLE), the SQLite error as its cause; every other sqlite3.Error
+# stays the calling reader's typed unavailability. The accepted EI-4D, EI-6A and
+# EI-6B writer adapters are unchanged. These tests were written in EI-7D to pin
+# the earlier classification so it could only change deliberately; SI-B is that
+# deliberate change (tests/test_sqlite_equity_read_storage_integrity.py).
 
-
-def _damage_page(database: Path, table: str) -> None:
-    """TEST-ONLY: overwrite the root b-tree page of ``table`` in a disposable copy."""
-    with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as c:
-        page_size = c.execute("PRAGMA page_size").fetchone()[0]
-        (root,) = c.execute(
-            "SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)
-        ).fetchone()
-    with database.open("r+b") as handle:
-        handle.seek((root - 1) * page_size)
-        handle.write(b"\xa5" * page_size)
+_damage_page = damage_page
 
 
 def _engine_calls(world: LifecycleWorld) -> dict[str, tuple[str, Callable[[], Any]]]:
@@ -689,26 +697,28 @@ def _engine_calls(world: LifecycleWorld) -> dict[str, tuple[str, Callable[[], An
         "equity_candle_evidence_snapshots",
     ],
 )
-def test_engine_sqlite_corrupt_is_typed_unavailability_with_the_engine_cause(
+def test_engine_sqlite_corrupt_is_the_permanent_storage_contract_with_the_engine_cause(
     world: LifecycleWorld, table: str
 ) -> None:
     family, call = _engine_calls(world)[table]
     _damage_page(world.database, table)
     before = file_state(world.database)
-    with pytest.raises(_UNAVAILABLE[family]) as raised:
+    with pytest.raises(EquityReadStorageIntegrityError) as raised:
         call()  # never data, never None, never an empty answer
+    assert raised.value.condition is EquityReadStorageIntegrityCondition.CORRUPT
+    assert not isinstance(raised.value, _UNAVAILABLE[family])
     cause = raised.value.__cause__
     assert isinstance(cause, sqlite3.DatabaseError)
     assert cause.sqlite_errorname == "SQLITE_CORRUPT"  # type: ignore[attr-defined]
-    assert "SQLITE_CORRUPT" in str(raised.value)  # named, not silent
+    assert "SQLITE" not in str(raised.value)  # the fixed contract text, never the engine's
     assert str(world.database.parent) not in str(raised.value)  # no path
     assert file_state(world.database) == before  # nothing repaired or written
 
 
-def test_engine_corruption_reaches_ei7c_as_a_typed_refusal_never_an_untyped_leak(
+def test_engine_corruption_reaches_ei7c_as_persisted_authority_invalid_never_a_leak(
     world: LifecycleWorld,
 ) -> None:
-    """Documented limitation: EI-7C has only DEPENDENCY_UNAVAILABLE for an engine fault."""
+    """SI-A maps the permanent contract to PERSISTED_AUTHORITY_INVALID, not retryable."""
     from northstar_application.application_services import (
         EquityReadQueryRefusal,
         EquityReadQueryRefusedError,
@@ -726,17 +736,18 @@ def test_engine_corruption_reaches_ei7c_as_a_typed_refusal_never_an_untyped_leak
     ):
         with pytest.raises(EquityReadQueryRefusedError) as raised:
             call()
-        assert raised.value.reason is EquityReadQueryRefusal.DEPENDENCY_UNAVAILABLE
+        assert raised.value.reason is EquityReadQueryRefusal.PERSISTED_AUTHORITY_INVALID
+        assert raised.value.retryable is False
         assert "SQLITE" not in str(raised.value) and str(world.database) not in str(raised.value)
 
 
-def test_engine_corruption_classification_equals_the_accepted_writer_adapters(
+def test_engine_corruption_is_permanent_in_the_readers_and_unchanged_in_the_writers(
     world: LifecycleWorld,
 ) -> None:
     _damage_page(world.database, "equity_recommendation_issuances")
-    with pytest.raises(EquityRecommendationIssuanceUnavailableError):
+    with pytest.raises(EquityReadStorageIntegrityError):
         readers(world.database)["issuances"].load_issuance(world.issuance_id)
-    with pytest.raises(EquityRecommendationLifecycleStoreUnavailableError):
+    with pytest.raises(EquityReadStorageIntegrityError):
         readers(world.database)["lifecycles"].load_lifecycle(world.issuance_id)
     with pytest.raises(EquityRecommendationIssuanceUnavailableError):  # accepted, unchanged
         SQLiteEquityRecommendationIssuanceAuthority(world.database).load_issuance(world.issuance_id)
@@ -745,22 +756,27 @@ def test_engine_corruption_classification_equals_the_accepted_writer_adapters(
 
 
 @pytest.mark.parametrize(
-    ("name", "content", "errorname"),
+    ("name", "content", "errorname", "condition"),
     [
-        ("truncated-with-magic", lambda data: data[:50], "SQLITE_CORRUPT"),
-        ("header-only", lambda data: data[:100], "SQLITE_CORRUPT"),
-        ("not-a-database", lambda data: b"\x00garbage" * 512, "SQLITE_NOTADB"),
+        ("truncated-with-magic", lambda data: data[:50], "SQLITE_CORRUPT", "CORRUPT"),
+        ("header-only", lambda data: data[:100], "SQLITE_CORRUPT", "CORRUPT"),
+        ("not-a-database", lambda data: b"\x00garbage" * 512, "SQLITE_NOTADB", "UNUSABLE"),
     ],
 )
-def test_engine_truncated_and_foreign_files_are_unavailable_and_create_nothing(
-    template: LifecycleWorld, tmp_path: Path, name: str, content: Any, errorname: str
+def test_engine_truncated_and_foreign_files_are_permanent_and_create_nothing(
+    template: LifecycleWorld,
+    tmp_path: Path,
+    name: str,
+    content: Any,
+    errorname: str,
+    condition: str,
 ) -> None:
     database = tmp_path / name / "db.sqlite3"
     database.parent.mkdir()
     database.write_bytes(content(template.database.read_bytes()))
     before = file_state(database)
-    _assert_every_family_unavailable(database)
-    with pytest.raises(EquityRecommendationIssuanceUnavailableError) as raised:
+    _assert_every_family_permanent(database, EquityReadStorageIntegrityCondition(condition))
+    with pytest.raises(EquityReadStorageIntegrityError) as raised:
         readers(database)["issuances"].load_issuance(template.issuance_id)
     assert raised.value.__cause__.sqlite_errorname == errorname  # type: ignore[union-attr]
     assert file_state(database) == before and sidecars(database) == []

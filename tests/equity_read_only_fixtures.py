@@ -295,6 +295,22 @@ def crash_image(source: Path, target: Path) -> Path:
     return hot
 
 
+def damage_page(database: Path, table: str) -> None:
+    """TEST-ONLY: overwrite the root b-tree page of ``table`` in a disposable copy.
+
+    SQLite then reports SQLITE_CORRUPT (an extended code of it) to any query
+    that reads that page; pages no query reads stay undetected.
+    """
+    with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as c:
+        page_size = c.execute("PRAGMA page_size").fetchone()[0]
+        (root,) = c.execute(
+            "SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)
+        ).fetchone()
+    with database.open("r+b") as handle:
+        handle.seek((root - 1) * page_size)
+        handle.write(b"\xa5" * page_size)
+
+
 def convert_to_wal(database: Path) -> None:
     """TEST-ONLY: switch a disposable copy to write-ahead logging; no sidecar is left behind."""
     with closing(sqlite3.connect(database)) as connection:

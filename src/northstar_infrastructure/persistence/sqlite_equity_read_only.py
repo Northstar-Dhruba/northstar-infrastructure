@@ -64,18 +64,27 @@ the filesystem:
 
 Engine-level failures
 ---------------------
-Every ``sqlite3.Error`` -- SQLITE_BUSY, SQLITE_LOCKED, SQLITE_CANTOPEN,
-SQLITE_READONLY_ROLLBACK, a missing table, and also SQLITE_CORRUPT and
-SQLITE_NOTADB -- is reported as the calling reader's typed unavailability,
-with SQLite's error name in its message and the SQLite error as its cause.
-The accepted reader ports have no permanent-integrity form for a
-storage-engine fault (the issuance and lifecycle integrity errors take only
-their record categories; the snapshot integrity error asserts that a
-snapshot exists), so engine corruption is classified exactly as the accepted
-EI-4D, EI-6A and EI-6B adapters classify it. Separating it from a transient
-outage needs an Application contract decision; until then it is a documented
-limitation. Corruption on a page no query of the call touches is not detected
-(no full ``PRAGMA integrity_check`` is run).
+Since SI-B (EI7-SI1, approved 2026-11-28), ``classify_read_failure``
+classifies every ``sqlite3.Error`` of the shared transaction by its SQLite
+**result code** -- the primary code in the low eight bits of an extended
+code -- never by message, error name or path:
+
+- SQLITE_CORRUPT, any extended variant: the Application's permanent
+  ``EquityReadStorageIntegrityError(CORRUPT)``;
+- SQLITE_NOTADB: ``EquityReadStorageIntegrityError(UNUSABLE)`` -- the
+  configured target is not a usable store, whether damaged or misconfigured;
+- everything else -- SQLITE_BUSY, SQLITE_LOCKED, SQLITE_CANTOPEN,
+  SQLITE_READONLY_ROLLBACK (a hot journal), I/O errors, a missing table -- and
+  any error without a usable integer code, including this module's pre-open
+  refusals: the calling reader's typed unavailability, with SQLite's error
+  name in its message.
+
+The permanent error is the Application-owned contract (SI-A), imported from
+``northstar_application.ports``, with the engine error as its ``__cause__``
+and only its fixed text as its message; it names no record, since the
+storage could not establish one. The accepted EI-4D, EI-6A and EI-6B writer
+adapters are unchanged. Corruption on a page no query of the call touches is
+not detected (no full ``PRAGMA integrity_check`` is run; EI7-SI2).
 
 Transactions
 ------------
@@ -84,8 +93,9 @@ connection, runs ``work`` inside one ``BEGIN`` ... ``ROLLBACK`` read
 transaction, so every query of ``work`` sees one consistent database state,
 and closes the connection. Nothing is ever committed. A ``sqlite3.Error``
 anywhere -- opening, confirming read-only mode, ``BEGIN``, a query, ending the
-transaction or closing -- is reported as ``unavailable(exc)``, the caller's
-typed unavailability; any other failure (a typed integrity failure of the
+transaction or closing -- is reported as ``classify_read_failure(exc,
+unavailable)``: the permanent storage contract or the caller's typed
+unavailability, as above; any other failure (a typed integrity failure of the
 caller's verified decoding, an interrupt) propagates unchanged. On every
 failure the transaction is rolled back and the connection closed by the
 accepted EI-2B cleanup helpers, which never replace the failure being
@@ -99,6 +109,11 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
+
+from northstar_application.ports import (
+    EquityReadStorageIntegrityCondition,
+    EquityReadStorageIntegrityError,
+)
 
 from northstar_infrastructure.persistence.sqlite_equity_candle_evidence import (
     _discard,  # EI-2B cleanup that never masks the failure being reported, reused unchanged
@@ -180,6 +195,38 @@ def sqlite_failure_name(exc: sqlite3.Error) -> str:
     return f"{name}: {exc}"
 
 
+_PERMANENT_STORAGE_FAILURES = {
+    sqlite3.SQLITE_CORRUPT: EquityReadStorageIntegrityCondition.CORRUPT,
+    sqlite3.SQLITE_NOTADB: EquityReadStorageIntegrityCondition.UNUSABLE,
+}
+
+
+def classify_read_failure(
+    exc: sqlite3.Error, unavailable: Callable[[sqlite3.Error], Exception]
+) -> Exception:
+    """The failure a reader reports for ``exc``: permanent storage, or its family's outage.
+
+    By the SQLite **result code** alone (EI7-SI1; SI-B): an extended code
+    carries its primary code in the low eight bits, so every SQLITE_CORRUPT
+    variant is the Application's permanent ``EquityReadStorageIntegrityError``
+    (CORRUPT) and SQLITE_NOTADB is UNUSABLE. Every other code -- busy, locked,
+    cannot open, read-only (a hot journal), I/O, a missing table -- and any
+    error without a usable integer code, including this module's own pre-open
+    refusals, stays ``unavailable(exc)``. No message, name or path is read.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if (
+        not isinstance(exc, ReadOnlyDatabaseRefusedError)
+        and isinstance(code, int)
+        and not isinstance(code, bool)
+        and code >= 0
+    ):
+        condition = _PERMANENT_STORAGE_FAILURES.get(code & 0xFF)
+        if condition is not None:
+            return EquityReadStorageIntegrityError(condition)
+    return unavailable(exc)
+
+
 def read_only_transaction[T](
     database_path: Path,
     work: Callable[[sqlite3.Connection], T],
@@ -189,14 +236,14 @@ def read_only_transaction[T](
     try:
         connection = connect_read_only(database_path)
     except sqlite3.Error as exc:
-        raise unavailable(exc) from exc
+        raise classify_read_failure(exc, unavailable) from exc
     try:
         try:
             connection.execute("BEGIN")
             result = work(connection)
             connection.execute("ROLLBACK")
         except sqlite3.Error as exc:
-            raise unavailable(exc) from exc
+            raise classify_read_failure(exc, unavailable) from exc
     except BaseException:
         _rollback(connection)
         _discard(connection)
@@ -204,5 +251,5 @@ def read_only_transaction[T](
     try:
         connection.close()
     except sqlite3.Error as exc:
-        raise unavailable(exc) from exc
+        raise classify_read_failure(exc, unavailable) from exc
     return result
